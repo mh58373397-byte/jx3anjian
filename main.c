@@ -663,6 +663,7 @@ static BOOL CALLBACK show_child_proc(HWND child, LPARAM lp) {
 }
 
 static void toggle_game_mode(HWND hwnd) {
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     g_game_mode = !g_game_mode;
     if (g_game_mode) {
         GetWindowRect(hwnd, &g_normal_rect);
