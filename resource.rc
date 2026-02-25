@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDR_INTERCEPTION_DLL  RCDATA  "interception.dll"
+IDR_INSTALL_EXE       RCDATA  "install-interception.exe"
