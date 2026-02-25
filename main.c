@@ -1115,7 +1115,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BTN_SETGMHK:
             g_setting_hk = 2; update_hotkey_labels(); break;
         case IDC_BTN_ABOUT: {
-            static const char msg_utf8[] = "by\xE8\x84\x86\xE7\x9A\xAE\xE5\x8D\xB7\xEF\xBC\x8C\xE5\xBC\x80\xE6\xBA\x90\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://github.com/mh58373397-byte/jx3anjian";
+            static const char msg_utf8[] = "by\xE8\x84\x86\xE7\x9A\xAE\xE5\x8D\xB7\xEF\xBC\x8C\xE5\xBC\x80\xE6\xBA\x90\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://github.com/mh58373397-byte/jx3anjian\n\njx3box\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://www.jx3box.com/tool/106371";
             static const char cap_utf8[] = "\xE5\x85\xB3\xE4\xBA\x8E";
             WCHAR msg_w[256], cap_w[32];
             MultiByteToWideChar(CP_UTF8, 0, msg_utf8, -1, msg_w, 256);
