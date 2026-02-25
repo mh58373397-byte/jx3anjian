@@ -123,6 +123,7 @@ static BOOL load_interception_dll(void) {
 #define IDC_BTN_SETGMHK   116
 #define IDC_LABEL_DELAY    117
 #define IDC_RADIO_HYBRID   118
+#define IDC_BTN_ABOUT      119
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
 #define MAX_KID 0x200
@@ -1032,6 +1033,8 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_lbl_gmhkname, WM_SETFONT, (WPARAM)hf, TRUE);
     HWND bsg = make_button(hwnd, IDC_BTN_SETGMHK, L"\x6539", LP_X+570, y+2, 30, 24);
     SendMessageW(bsg, WM_SETFONT, (WPARAM)hf, TRUE);
+    HWND babout = make_button(hwnd, IDC_BTN_ABOUT, L"\x5173\x4E8E", LP_X+670, y, 60, 28);
+    SendMessageW(babout, WM_SETFONT, (WPARAM)hf, TRUE);
 
     update_hotkey_labels();
     update_ui_labels();
@@ -1111,6 +1114,15 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_setting_hk = 1; update_hotkey_labels(); break;
         case IDC_BTN_SETGMHK:
             g_setting_hk = 2; update_hotkey_labels(); break;
+        case IDC_BTN_ABOUT: {
+            static const char msg_utf8[] = "by\xE8\x84\x86\xE7\x9A\xAE\xE5\x8D\xB7\xEF\xBC\x8C\xE5\xBC\x80\xE6\xBA\x90\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://github.com/mh58373397-byte/jx3anjian";
+            static const char cap_utf8[] = "\xE5\x85\xB3\xE4\xBA\x8E";
+            WCHAR msg_w[256], cap_w[32];
+            MultiByteToWideChar(CP_UTF8, 0, msg_utf8, -1, msg_w, 256);
+            MultiByteToWideChar(CP_UTF8, 0, cap_utf8, -1, cap_w, 32);
+            MessageBoxW(hwnd, msg_w, cap_w, MB_OK | MB_ICONINFORMATION);
+            break;
+        }
         }
         return 0;
 
