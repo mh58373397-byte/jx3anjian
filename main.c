@@ -1058,10 +1058,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCHITTEST:
         if (g_game_mode) {
             LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
-            if (hit == HTCLIENT) {
-                if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) return HTCLIENT;
-                return HTCAPTION;
-            }
+            if (hit == HTCLIENT) return HTCAPTION;
             return hit;
         }
         break;
@@ -1133,7 +1130,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
 
-    case WM_RBUTTONUP:
+    case WM_NCRBUTTONDOWN:
+        if (g_game_mode) return 0;
+        break;
+    case WM_NCRBUTTONUP:
         if (g_game_mode) {
             HMENU hMenu = CreatePopupMenu();
             AppendMenuW(hMenu, MF_STRING, IDM_GM_TOGGLE,
