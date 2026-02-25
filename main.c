@@ -463,6 +463,13 @@ static int kid_to_vk(int kid) {
         case 0x5B: return VK_LWIN;     case 0x5C: return VK_RWIN;
         case 0x35: return VK_DIVIDE;   case 0x1C: return VK_RETURN;
         }
+    } else {
+        switch (sc) {
+        case 0x1D: return VK_LCONTROL;
+        case 0x38: return VK_LMENU;
+        case 0x2A: return VK_LSHIFT;
+        case 0x36: return VK_RSHIFT;
+        }
     }
     return (int)MapVirtualKeyW(sc, MAPVK_VSC_TO_VK);
 }
