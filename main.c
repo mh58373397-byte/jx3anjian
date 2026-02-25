@@ -155,7 +155,7 @@ static HHOOK g_kbhook       = NULL;
 static RECT  g_normal_rect;
 static int   g_game_x = 1233, g_game_y = 147, g_game_w = 200, g_game_h = 80;
 
-static int   g_hk_toggle_vk = VK_NUMPAD7;
+static int   g_hk_toggle_vk = VK_F1;
 static int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
 
@@ -488,7 +488,7 @@ static void init_exclude_defaults(void) {
 
 static void init_custom_keys_defaults(void) {
     memset(g_custom_keys, 0, sizeof(g_custom_keys));
-    g_custom_keys['F']=TRUE; g_custom_keys['G']=TRUE;
+    g_custom_keys['F']=TRUE;
 }
 
 static int build_active_list(WCHAR *buf, int bufmax, int max_show) {
