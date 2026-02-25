@@ -450,14 +450,6 @@ static BOOL is_skippable(int vk) {
 
 static BOOL is_excluded(int vk) { return (vk > 0 && vk < 256 && g_exclude[vk]); }
 
-static BOOL is_modifier(int vk) {
-    return vk==VK_LMENU || vk==VK_RMENU || vk==VK_MENU ||
-           vk==VK_LCONTROL || vk==VK_RCONTROL || vk==VK_CONTROL ||
-           vk==VK_LWIN || vk==VK_RWIN;
-}
-
-static volatile int g_mod_count = 0;
-
 static int kid_to_vk(int kid) {
     unsigned short sc = (unsigned short)(kid & 0xFF);
     if (kid & 0x100) {
@@ -574,7 +566,6 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 BOOL is_hk = (vk == g_hk_toggle_vk || vk == g_hk_game_vk);
                 if (ks->state & INTERCEPTION_KEY_UP) {
                     if (!is_hk) {
-                        if (g_held[kid] && is_modifier(vk)) g_mod_count--;
                         g_held[kid]=FALSE; g_hdev[kid]=0;
                         if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
                             if (!(g_mode==MODE_HYBRID && g_toggled[kid]))
@@ -582,17 +573,15 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                         }
                     }
                 } else if (!is_hk) {
-                    BOOL first_press = !g_held[kid];
-                    if (first_press && is_modifier(vk)) g_mod_count++;
-                    if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && first_press) {
-                        if (!is_skippable(vk) && vk>0 && vk<256 && g_custom_keys[vk] && g_mod_count<=0) {
+                    if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[kid]) {
+                        if (!is_skippable(vk) && vk>0 && vk<256 && g_custom_keys[vk]) {
                             if (g_toggled[kid]) { g_toggled[kid]=FALSE; g_tdev[kid]=0; active_remove(kid); }
                             else { g_toggled[kid]=TRUE; g_tdev[kid]=dev; g_tflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP; active_add(kid); }
                         }
                     }
                     g_held[kid]=TRUE; g_hdev[kid]=dev;
                     g_hflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP;
-                    if ((g_mode==MODE_HOLD || g_mode==MODE_HYBRID) && g_mod_count<=0) active_add(kid);
+                    if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) active_add(kid);
                 }
             }
         }
