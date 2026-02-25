@@ -1225,8 +1225,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
+    /* UTF-8: 丐帮高手v3 - convert at runtime to avoid source encoding issues */
+    static const char title_utf8[] = "\xE4\xBA\xA1\xE5\xB8\xAF\xE9\xAB\x98\xE6\x89\x8Bv3";
+    WCHAR title_w[32];
+    MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoKeyClass",
-        L"\u4EA1\u5E2F\u9AD8\u624Bv3",
+        title_w,
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         sx, sy, ww, wh, NULL, NULL, hInst, NULL);
 
