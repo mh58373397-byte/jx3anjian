@@ -124,6 +124,9 @@ static BOOL load_interception_dll(void) {
 #define IDC_LABEL_DELAY    117
 #define IDC_RADIO_HYBRID   118
 #define IDC_BTN_ABOUT      119
+#define IDM_GM_TOGGLE      200
+#define IDM_GM_SHOWMAIN    201
+#define IDM_GM_EXIT        202
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
 #define MAX_KID 0x200
@@ -1055,7 +1058,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCHITTEST:
         if (g_game_mode) {
             LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
-            if (hit == HTCLIENT) return HTCAPTION;
+            if (hit == HTCLIENT) {
+                if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) return HTCLIENT;
+                return HTCAPTION;
+            }
             return hit;
         }
         break;
@@ -1126,6 +1132,25 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         }
         return 0;
+
+    case WM_RBUTTONUP:
+        if (g_game_mode) {
+            HMENU hMenu = CreatePopupMenu();
+            AppendMenuW(hMenu, MF_STRING, IDM_GM_TOGGLE,
+                g_active ? L"\x5173\x95ED\x8FDE\x53D1" : L"\x5F00\x542F\x8FDE\x53D1");
+            AppendMenuW(hMenu, MF_STRING, IDM_GM_SHOWMAIN, L"\x663E\x793A\x4E3B\x754C\x9762");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(hMenu, MF_STRING, IDM_GM_EXIT, L"\x9000\x51FA");
+            POINT pt; GetCursorPos(&pt);
+            SetForegroundWindow(hwnd);
+            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(hMenu);
+            if (cmd == IDM_GM_TOGGLE) toggle_active();
+            else if (cmd == IDM_GM_SHOWMAIN) toggle_game_mode(hwnd);
+            else if (cmd == IDM_GM_EXIT) DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
 
     case WM_LBUTTONDOWN: {
         int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
