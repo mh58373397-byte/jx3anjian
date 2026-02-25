@@ -1226,7 +1226,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
     g_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoKeyClass",
-        L"\x4EA1\x5E2F\x9AD8\x624Bv3",
+        L"\u4EA1\u5E2F\u9AD8\u624Bv3",
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         sx, sy, ww, wh, NULL, NULL, hInst, NULL);
 
