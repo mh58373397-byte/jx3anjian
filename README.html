@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoKey - 驱动级键盘连发工具</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 900px; margin: 0 auto; padding: 20px 40px; color: #24292e; background: #fff; }
+  h1 { border-bottom: 1px solid #eaecef; padding-bottom: 10px; }
+  h2 { border-bottom: 1px solid #eaecef; padding-bottom: 6px; margin-top: 32px; }
+  h3 { margin-top: 24px; }
+  hr { border: none; border-top: 1px solid #eaecef; margin: 24px 0; }
+  code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 90%; }
+  pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+  th { background: #f6f8fa; font-weight: 600; }
+  blockquote { border-left: 4px solid #dfe2e5; margin: 12px 0; padding: 4px 16px; color: #6a737d; }
+  a { color: #0366d6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul { padding-left: 24px; }
+  ol { padding-left: 24px; }
+  strong { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>AutoKey - 驱动级键盘连发工具</h1>
+
+<p>基于 <a href="https://github.com/oblitum/Interception">Interception</a> 驱动的高性能键盘连发工具，在驱动层模拟按键输入，支持微秒级精度控制。带可视化键盘布局的图形界面，点击即可配置。</p>
+
+<h2>功能特性</h2>
+<ul>
+  <li><strong>驱动级按键模拟</strong> — 通过 Interception 驱动在内核层发送键盘事件，非应用层模拟</li>
+  <li><strong>三种连发模式</strong> — Hold（按住连发）、Toggle（指定连发）、Hybrid（混合模式）</li>
+  <li><strong>可视化键盘布局</strong> — 界面内嵌键盘图，点击按键即可设置排除/连发，无需记忆快捷键</li>
+  <li><strong>微秒级延迟控制</strong> — 延迟范围 100μs ~ 1000ms，支持 burst 模式突破极限速度</li>
+  <li><strong>游戏模式</strong> — 半透明无边框悬浮窗，不遮挡游戏画面</li>
+  <li><strong>实时速度显示</strong> — 显示每秒实际按键次数（PPS）</li>
+  <li><strong>可自定义快捷键</strong> — 启动/关闭连发、游戏模式的热键均可自定义</li>
+  <li><strong>配置持久化</strong> — 所有设置自动保存/加载</li>
+  <li><strong>驱动自动安装</strong> — 首次运行自动引导安装</li>
+</ul>
+
+<hr>
+
+<h2>安装与首次运行</h2>
+
+<h3>1. 编译（如果没有现成 exe）</h3>
+<p><strong>环境要求：</strong> Windows 10/11 x64 + Visual Studio 2022</p>
+<pre><code>build.bat</code></pre>
+
+<h3>2. 首次运行</h3>
+<ol>
+  <li>双击运行 <code>autokey.exe</code></li>
+  <li>程序检测到 Interception 驱动未安装，弹出提示框，点击 <strong>"是"</strong></li>
+  <li>以管理员权限自动安装驱动</li>
+  <li><strong>安装完成后必须重启电脑</strong>，驱动才能加载</li>
+  <li>重启后再次运行 <code>autokey.exe</code>，界面显示 <strong>"✔ Interception 驱动就绪"</strong> 即可使用</li>
+</ol>
+
+<hr>
+
+<h2>快捷键一览</h2>
+<table>
+  <thead>
+    <tr><th>默认按键</th><th>功能</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>小键盘 7</strong></td><td>开启/关闭连发</td><td>主开关，可在界面中点击「改」自定义</td></tr>
+    <tr><td><strong>F9</strong></td><td>游戏模式</td><td>切换半透明悬浮窗，可在界面中点击「改」自定义</td></tr>
+  </tbody>
+</table>
+<blockquote>快捷键可在界面中点击「启动」或「游戏」旁的「改」按钮重新设置，按 Esc 取消设置。</blockquote>
+
+<hr>
+
+<h2>详细功能说明</h2>
+
+<h3>三种连发模式</h3>
+<table>
+  <thead>
+    <tr><th>模式</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Hold（按住连发）</strong></td><td>按住任意键 = 连发，松开 = 停止。橙色键可连发，红色键为排除</td></tr>
+    <tr><td><strong>Toggle（指定连发）</strong></td><td>按一下白名单中的键 = 开始连发，再按 = 停止。绿色键为已选</td></tr>
+    <tr><td><strong>Hybrid（混合模式）</strong></td><td>绿色键可 Toggle，橙色键可 Hold，红色键为排除。同时支持两种方式</td></tr>
+  </tbody>
+</table>
+
+<h3>按键设置方式</h3>
+<p>通过<strong>点击界面上的键盘图</strong>来设置：</p>
+<ul>
+  <li><strong>Hold 模式</strong>：点击键盘上的键，橙色↔红色切换（连发↔不连发）</li>
+  <li><strong>Toggle 模式</strong>：点击键盘上的键，绿色↔灰色切换（已选↔未选）</li>
+  <li><strong>Hybrid 模式</strong>：绿色=指定连发，橙色=按住连发，红色=排除</li>
+</ul>
+<p>灰色键为热键（启动/游戏），不可配置。</p>
+
+<h3>默认排除键（Hold 模式）</h3>
+<p>W、A、S、D、Tab、Space、Enter、Shift、Caps、Esc、Backspace、方向键、F1~F12、Win、Ctrl、Alt、NumLock、Scroll 等系统/移动相关键默认不连发。</p>
+
+<h3>默认指定键（Toggle 模式）</h3>
+<p>F、G 默认加入白名单。</p>
+
+<h3>延迟调节</h3>
+<p>使用界面上的 <strong>-</strong> 和 <strong>+</strong> 按钮调节按键间隔：</p>
+<table>
+  <thead>
+    <tr><th>延迟范围</th><th>步进</th><th>显示格式</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>≥ 10ms</td><td>每次 1ms</td><td><code>50ms</code></td></tr>
+    <tr><td>100μs ~ 9.9ms</td><td>每次 100μs</td><td><code>900μs (0.9ms)</code></td></tr>
+    <tr><td>100μs（最小值）</td><td>进入 burst 模式</td><td><code>100μs x5</code></td></tr>
+  </tbody>
+</table>
+<p><strong>Burst 模式：</strong> 延迟减到 100μs 后，继续按 <strong>-</strong> 增加每周期发送次数（100μs x1 → x2 → ... → x1000），按 <strong>+</strong> 反向操作。</p>
+
+<h3>游戏模式</h3>
+<p>点击 <strong>「游戏模式」</strong> 按钮或按默认热键 <strong>F9</strong>：</p>
+<ul>
+  <li>窗口变为半透明无边框悬浮窗（约 35% 不透明度）</li>
+  <li>仅显示：<strong>状态</strong> / <strong>连发中的按键</strong> / <strong>速度</strong></li>
+  <li>鼠标拖拽窗口可移动</li>
+  <li>窗口位置和大小自动记忆</li>
+</ul>
+<p>再次点击或按热键退出游戏模式。</p>
+
+<hr>
+
+<h2>配置文件</h2>
+<p>所有设置自动保存到程序同目录的 <code>config.json</code>：</p>
+<pre><code>{
+  "delay_us": 50000,
+  "burst": 1,
+  "mode": 0,
+  "exclude": [87, 65, 83, 68, 9, 32, 13, 16],
+  "custom_keys": [70, 71],
+  "game_x": 100,
+  "game_y": 200,
+  "game_w": 200,
+  "game_h": 80,
+  "hk_toggle": 103,
+  "hk_game": 120
+}</code></pre>
+
+<table>
+  <thead>
+    <tr><th>字段</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>delay_us</code></td><td>延迟（微秒），50000 = 50ms</td></tr>
+    <tr><td><code>burst</code></td><td>burst 模式倍数，默认 1</td></tr>
+    <tr><td><code>mode</code></td><td>0 = Hold，1 = Toggle，2 = Hybrid</td></tr>
+    <tr><td><code>exclude</code></td><td>Hold 模式排除键的 VK 码列表</td></tr>
+    <tr><td><code>custom_keys</code></td><td>Toggle 模式白名单键的 VK 码列表</td></tr>
+    <tr><td><code>game_x/y/w/h</code></td><td>游戏模式窗口位置和大小</td></tr>
+    <tr><td><code>hk_toggle</code></td><td>启动/关闭连发热键的 VK 码（默认 103 = 小键盘 7）</td></tr>
+    <tr><td><code>hk_game</code></td><td>游戏模式热键的 VK 码（默认 120 = F9）</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2>项目结构</h2>
+<pre><code>├── main.c                    # 主程序源码（单文件，约 1200 行）
+├── build.bat                 # 一键编译脚本
+├── interception.h            # Interception 驱动 API 头文件
+├── interception.dll          # Interception 运行库（编译时嵌入 exe）
+├── install-interception.exe  # 驱动安装程序（编译时嵌入 exe）
+├── resource.h                # 资源 ID 定义
+├── resource.rc               # 资源脚本（将 dll 和 exe 嵌入）
+└── autokey.exe               # 编译产物（可选提交）</code></pre>
+<p>编译后生成单个 <code>autokey.exe</code>，内嵌了 <code>interception.dll</code> 和 <code>install-interception.exe</code>，无需额外文件即可运行和安装驱动。</p>
+
+<h2>技术实现</h2>
+<ul>
+  <li><strong>按键捕获：</strong> Interception 驱动拦截所有键盘事件，记录按下/释放状态</li>
+  <li><strong>按键发送：</strong> <code>interception_send()</code> 批量发送按下+释放两个事件（1 次调用）</li>
+  <li><strong>高精度计时：</strong> <code>QueryPerformanceCounter</code> 实现微秒级延迟精度，大延迟用 <code>Sleep</code> 节省 CPU，最后一段用 QPC 自旋精确等待</li>
+  <li><strong>线程模型：</strong> 捕获线程 + 发送线程分离，发送线程设为 <code>THREAD_PRIORITY_TIME_CRITICAL</code></li>
+  <li><strong>活跃按键追踪：</strong> 最多 16 个活跃槽位，预计算扫描码和 flags，热循环零系统调用开销</li>
+  <li><strong>DLL 动态加载：</strong> 从资源释放 <code>interception.dll</code> 到临时目录后加载，单 exe 分发</li>
+</ul>
+
+<h2>注意事项</h2>
+<ul>
+  <li>Interception 驱动安装需要<strong>管理员权限</strong></li>
+  <li>安装驱动后必须<strong>重启电脑</strong></li>
+  <li>部分反作弊系统可能检测 Interception 驱动，请自行评估风险</li>
+  <li>启动热键和游戏模式热键在连发中不会被触发</li>
+</ul>
+
+<h2>依赖</h2>
+<ul>
+  <li><a href="https://github.com/oblitum/Interception">Interception</a> — 键盘/鼠标驱动级拦截框架</li>
+</ul>
+
+<h2>License</h2>
+<p>MIT</p>
+
+</body>
+</html>
