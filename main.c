@@ -128,6 +128,7 @@ static BOOL load_interception_dll(void) {
 #define IDC_LABEL_DELAY    117
 #define IDC_RADIO_HYBRID   118
 #define IDC_BTN_ABOUT      119
+#define IDC_CHK_KEYLOCK    121
 #define IDM_GM_TOGGLE      200
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
@@ -179,9 +180,12 @@ static int   g_hk_toggle_vk = VK_F1;
 static int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
 
+static BOOL  g_key_lock     = FALSE;
+
 static HWND g_lbl_driver, g_lbl_status, g_lbl_delay, g_lbl_speed;
 static HWND g_lbl_repeat, g_lbl_burst, g_lbl_hkname, g_lbl_gmhkname;
 static HWND g_btn_startstop, g_radio_hold, g_radio_toggle, g_radio_hybrid;
+static HWND g_chk_keylock;
 
 static int     g_repeat_btn   = 0;
 static int     g_repeat_count = 0;
@@ -418,7 +422,8 @@ static void save_config(void) {
     SCFG("],\n%s", "");
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
-    SCFG("  \"hk_toggle\": %d, \"hk_game\": %d\n}\n", g_hk_toggle_vk, g_hk_game_vk);
+    SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
+    SCFG("  \"key_lock\": %d\n}\n", g_key_lock ? 1 : 0);
     #undef SCFG
     HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
@@ -460,6 +465,7 @@ static void load_config(void) {
     p = strstr(buf, "\"game_h\""); if (p) { p = strchr(p, ':'); if (p) { g_game_h = atoi(p+1); if (g_game_h<40) g_game_h=80; } }
     p = strstr(buf, "\"hk_toggle\""); if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_toggle_vk=v; } }
     p = strstr(buf, "\"hk_game\"");   if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_game_vk=v; } }
+    p = strstr(buf, "\"key_lock\""); if (p) { p = strchr(p, ':'); if (p) g_key_lock = (atoi(p+1) != 0); }
 }
 
 /* ================================================================== */
@@ -657,6 +663,24 @@ static unsigned short mid_to_mouse_up(int mid) {
     return 0;
 }
 
+static void send_toggled_keyups(void) {
+    for (int kid=0; kid<MAX_KID; kid++) {
+        if (g_toggled[kid] && g_tdev[kid] && g_drv_ok) {
+            if (kid >= MID_LBUTTON && kid <= MID_XBUTTON2) {
+                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
+                ms.state = mid_to_mouse_up(kid);
+                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&ms, 1);
+            } else {
+                InterceptionKeyStroke up_ks;
+                up_ks.code = (unsigned short)(kid & 0xFF);
+                up_ks.state = INTERCEPTION_KEY_UP | g_tflags[kid];
+                up_ks.information = 0;
+                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&up_ks, 1);
+            }
+        }
+    }
+}
+
 static void release_toggled(void) {
     for (int kid=0; kid<MAX_KID; kid++) {
         if (g_toggled[kid] && g_tdev[kid] && g_drv_ok) {
@@ -844,9 +868,13 @@ static void toggle_active(void) {
     if (g_active) {
         g_active = FALSE;
         if (g_rthread) { WaitForSingleObject(g_rthread,500); CloseHandle(g_rthread); g_rthread=NULL; }
-        release_toggled();
+        if (g_key_lock)
+            send_toggled_keyups();
+        else
+            release_toggled();
     } else {
-        release_toggled(); g_active = TRUE;
+        if (!g_key_lock) release_toggled();
+        g_active = TRUE;
         g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
     }
     InvalidateRect(g_hwnd, NULL, TRUE);
@@ -1192,6 +1220,10 @@ static void create_controls(HWND hwnd) {
     g_orig_btn_proc = (WNDPROC)SetWindowLongPtrW(bdec, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     SetWindowLongPtrW(binc, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     y += 26;
+    g_chk_keylock = CreateWindowW(L"BUTTON", L"\x6309\x952E\x9501\x5B9A",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+5, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_KEYLOCK, NULL, NULL);
+    SendMessageW(g_chk_keylock, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_key_lock) SendMessageW(g_chk_keylock, BM_SETCHECK, BST_CHECKED, 0);
     g_lbl_burst = make_label(hwnd, IDC_LABEL_BURST, L"", 510, y, 190, 18, 0);
     SendMessageW(g_lbl_burst, WM_SETFONT, (WPARAM)hf, TRUE);
     y += 6;
@@ -1305,6 +1337,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_setting_hk = 1; update_hotkey_labels(); break;
         case IDC_BTN_SETGMHK:
             g_setting_hk = 2; update_hotkey_labels(); break;
+        case IDC_CHK_KEYLOCK:
+            g_key_lock = (SendMessageW(g_chk_keylock, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (!g_key_lock && !g_active) release_toggled();
+            save_config();
+            break;
         case IDC_BTN_ABOUT: {
             static const char msg_utf8[] = "by\xE8\x84\x86\xE7\x9A\xAE\xE5\x8D\xB7\xEF\xBC\x8C\xE5\xBC\x80\xE6\xBA\x90\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://github.com/mh58373397-byte/jx3anjian\n\njx3box\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://www.jx3box.com/tool/106371";
             static const char cap_utf8[] = "\xE5\x85\xB3\xE4\xBA\x8E";
