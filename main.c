@@ -143,6 +143,13 @@ static BOOL load_interception_dll(void) {
 #define MODE_CUSTOM 1
 #define MODE_HYBRID 2
 
+#define GAME_ALPHA          90
+#define UI_TIMER_MS         200
+#define TOGGLE_DEBOUNCE_MS  300
+#define INTERCEPT_POLL_MS   200
+
+static CRITICAL_SECTION g_cs_active;
+
 static InterceptionContext g_ctx      = NULL;
 static BOOL                g_drv_ok   = FALSE;
 static volatile BOOL       g_active   = FALSE;
@@ -180,6 +187,39 @@ static int     g_repeat_btn   = 0;
 static int     g_repeat_count = 0;
 static WNDPROC g_orig_btn_proc = NULL;
 
+static HFONT  g_font_kb      = NULL;
+static HFONT  g_font_legend  = NULL;
+static HFONT  g_font_ui      = NULL;
+static HFONT  g_font_game    = NULL;
+static HPEN   g_pen_border   = NULL;
+static HBRUSH g_br_excl      = NULL;
+static HBRUSH g_br_hold      = NULL;
+static HBRUSH g_br_custom    = NULL;
+static HBRUSH g_br_unsel     = NULL;
+static HBRUSH g_br_skip      = NULL;
+static HBRUSH g_br_kbbg      = NULL;
+
+static void init_gdi_cache(void) {
+    g_font_kb     = CreateFontW(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    g_font_legend = CreateFontW(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    g_font_ui     = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    g_font_game   = CreateFontW(17, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    g_pen_border  = CreatePen(PS_SOLID, 1, RGB(60,60,60));
+    g_br_excl     = CreateSolidBrush(RGB(200,60,60));
+    g_br_hold     = CreateSolidBrush(RGB(220,140,20));
+    g_br_custom   = CreateSolidBrush(RGB(50,170,50));
+    g_br_unsel    = CreateSolidBrush(RGB(180,180,180));
+    g_br_skip     = CreateSolidBrush(RGB(100,100,100));
+    g_br_kbbg     = CreateSolidBrush(RGB(240,240,240));
+}
+
+static void cleanup_gdi_cache(void) {
+    HGDIOBJ objs[] = { g_font_kb, g_font_legend, g_font_ui, g_font_game, g_pen_border,
+                       g_br_excl, g_br_hold, g_br_custom, g_br_unsel, g_br_skip, g_br_kbbg };
+    for (int i = 0; i < (int)(sizeof(objs)/sizeof(objs[0])); i++)
+        if (objs[i]) DeleteObject(objs[i]);
+}
+
 static int kid_to_vk(int kid);
 
 #define MAX_ACTIVE 16
@@ -194,11 +234,12 @@ static volatile int        g_active_count = 0;
 static volatile LONG       g_pps = 0;
 
 static void active_add(int kid) {
+    EnterCriticalSection(&g_cs_active);
     for (int i = 0; i < g_active_count; i++)
-        if (g_aslots[i].kid == kid) return;
-    if (g_active_count >= MAX_ACTIVE) return;
+        if (g_aslots[i].kid == kid) { LeaveCriticalSection(&g_cs_active); return; }
+    if (g_active_count >= MAX_ACTIVE) { LeaveCriticalSection(&g_cs_active); return; }
     int vk = kid_to_vk(kid);
-    if (vk <= 0) return;
+    if (vk <= 0) { LeaveCriticalSection(&g_cs_active); return; }
     ActiveSlot s; memset(&s, 0, sizeof(s));
     s.kid = kid; s.vk = vk; s.is_mouse = FALSE;
     s.scan = (unsigned short)(kid & 0xFF);
@@ -206,27 +247,33 @@ static void active_add(int kid) {
     s.flags_up = s.flags_dn | INTERCEPTION_KEY_UP;
     g_aslots[g_active_count] = s;
     g_active_count++;
+    LeaveCriticalSection(&g_cs_active);
 }
 
 static void active_add_mouse(int mid, int vk, unsigned short dn, unsigned short up) {
+    EnterCriticalSection(&g_cs_active);
     for (int i = 0; i < g_active_count; i++)
-        if (g_aslots[i].kid == mid) return;
-    if (g_active_count >= MAX_ACTIVE) return;
+        if (g_aslots[i].kid == mid) { LeaveCriticalSection(&g_cs_active); return; }
+    if (g_active_count >= MAX_ACTIVE) { LeaveCriticalSection(&g_cs_active); return; }
     ActiveSlot s; memset(&s, 0, sizeof(s));
     s.kid = mid; s.vk = vk; s.is_mouse = TRUE;
     s.mouse_dn = dn; s.mouse_up = up;
     g_aslots[g_active_count] = s;
     g_active_count++;
+    LeaveCriticalSection(&g_cs_active);
 }
 
 static void active_remove(int kid) {
+    EnterCriticalSection(&g_cs_active);
     for (int i = 0; i < g_active_count; i++) {
         if (g_aslots[i].kid == kid) {
             g_aslots[i] = g_aslots[g_active_count - 1];
             g_active_count--;
+            LeaveCriticalSection(&g_cs_active);
             return;
         }
     }
+    LeaveCriticalSection(&g_cs_active);
 }
 
 /* ================================================================== */
@@ -359,18 +406,20 @@ static void save_config(void) {
     WCHAR path[MAX_PATH];
     get_exe_dir(path, MAX_PATH);
     lstrcatW(path, L"config.json");
-    char buf[4096]; int pos = 0;
-    pos += sprintf(buf+pos, "{\n  \"delay_us\": %d,\n  \"burst\": %d,\n  \"mode\": %d,\n", g_delay, g_burst, g_mode);
-    pos += sprintf(buf+pos, "  \"exclude\": [");
+    char buf[8192]; int pos = 0; int rem = (int)sizeof(buf);
+    #define SCFG(fmt, ...) do { int n = snprintf(buf+pos, rem, fmt, __VA_ARGS__); if (n>0){pos+=n; rem-=n;} } while(0)
+    SCFG("{\n  \"delay_us\": %d,\n  \"burst\": %d,\n  \"mode\": %d,\n", g_delay, g_burst, g_mode);
+    SCFG("  \"exclude\": [%s", "");
     int first = 1;
-    for (int i = 1; i < 256; i++) { if (!g_exclude[i]) continue; if (!first) pos += sprintf(buf+pos, ","); pos += sprintf(buf+pos, "%d", i); first = 0; }
-    pos += sprintf(buf+pos, "],\n  \"custom_keys\": [");
+    for (int i = 1; i < 256 && rem > 8; i++) { if (!g_exclude[i]) continue; if (!first) SCFG(",%s",""); SCFG("%d", i); first = 0; }
+    SCFG("],\n  \"custom_keys\": [%s", "");
     first = 1;
-    for (int i = 1; i < 256; i++) { if (!g_custom_keys[i]) continue; if (!first) pos += sprintf(buf+pos, ","); pos += sprintf(buf+pos, "%d", i); first = 0; }
-    pos += sprintf(buf+pos, "],\n");
-    pos += sprintf(buf+pos, "  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
-                   g_game_x, g_game_y, g_game_w, g_game_h);
-    pos += sprintf(buf+pos, "  \"hk_toggle\": %d, \"hk_game\": %d\n}\n", g_hk_toggle_vk, g_hk_game_vk);
+    for (int i = 1; i < 256 && rem > 8; i++) { if (!g_custom_keys[i]) continue; if (!first) SCFG(",%s",""); SCFG("%d", i); first = 0; }
+    SCFG("],\n%s", "");
+    SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
+         g_game_x, g_game_y, g_game_w, g_game_h);
+    SCFG("  \"hk_toggle\": %d, \"hk_game\": %d\n}\n", g_hk_toggle_vk, g_hk_game_vk);
+    #undef SCFG
     HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
     DWORD written; WriteFile(hFile, buf, (DWORD)pos, &written, NULL); CloseHandle(hFile);
@@ -619,7 +668,9 @@ static void release_toggled(void) {
     }
     memset((void *)g_toggled, 0, sizeof(g_toggled));
     memset((void *)g_tdev, 0, sizeof(g_tdev));
+    EnterCriticalSection(&g_cs_active);
     g_active_count = 0;
+    LeaveCriticalSection(&g_cs_active);
 }
 
 static const struct { int mid; int vk; unsigned short dn; unsigned short up; } g_mouse_btns[] = {
@@ -641,7 +692,7 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
         INTERCEPTION_FILTER_MOUSE_BUTTON_4_DOWN | INTERCEPTION_FILTER_MOUSE_BUTTON_4_UP |
         INTERCEPTION_FILTER_MOUSE_BUTTON_5_DOWN | INTERCEPTION_FILTER_MOUSE_BUTTON_5_UP);
     while (!g_quit) {
-        InterceptionDevice dev = interception_wait_with_timeout(g_ctx, 200);
+        InterceptionDevice dev = interception_wait_with_timeout(g_ctx, INTERCEPT_POLL_MS);
         if (dev == 0) continue;
         InterceptionStroke stroke;
         if (interception_receive(g_ctx, dev, &stroke, 1) <= 0) continue;
@@ -683,17 +734,15 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                     }
                 }
                 if (ms->state & g_mouse_btns[b].dn) {
-                    if (!is_excluded(vk)) {
-                        if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[mid]) {
-                            if (vk>0 && vk<256 && g_custom_keys[vk]) {
-                                if (g_toggled[mid]) { g_toggled[mid]=FALSE; g_tdev[mid]=0; active_remove(mid); }
-                                else { g_toggled[mid]=TRUE; g_tdev[mid]=dev; active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up); }
-                            }
+                    if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[mid]) {
+                        if (!is_excluded(vk) && vk>0 && vk<256 && g_custom_keys[vk]) {
+                            if (g_toggled[mid]) { g_toggled[mid]=FALSE; g_tdev[mid]=0; active_remove(mid); }
+                            else { g_toggled[mid]=TRUE; g_tdev[mid]=dev; active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up); }
                         }
-                        g_held[mid]=TRUE; g_hdev[mid]=dev;
-                        if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)
-                            active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up);
                     }
+                    g_held[mid]=TRUE; g_hdev[mid]=dev;
+                    if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)
+                        active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up);
                 }
             }
         }
@@ -722,12 +771,17 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
     InterceptionKeyStroke ibatch[2]; memset(ibatch, 0, sizeof(ibatch));
     LARGE_INTEGER freq, last; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&last);
     LONG local_count = 0;
+    ActiveSlot local_slots[MAX_ACTIVE];
     while (g_active) {
-        int cnt = g_active_count;
+        int cnt;
+        EnterCriticalSection(&g_cs_active);
+        cnt = g_active_count;
+        if (cnt > 0) memcpy(local_slots, (void*)g_aslots, cnt * sizeof(ActiveSlot));
+        LeaveCriticalSection(&g_cs_active);
         if (cnt == 0) { Sleep(1); continue; }
         int mode=g_mode, delay=g_delay; BOOL any_sent=FALSE;
         for (int i=0; i<cnt && g_active; i++) {
-            int kid=g_aslots[i].kid, vk=g_aslots[i].vk;
+            int kid=local_slots[i].kid, vk=local_slots[i].vk;
             BOOL is_toggled_on = g_toggled[kid];
             BOOL is_held_on = g_held[kid];
             BOOL is_on;
@@ -743,18 +797,18 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             else idev = g_tdev[kid];
             if (!idev) continue;
             int burst = (delay<=100) ? g_burst : 1;
-            if (g_aslots[i].is_mouse) {
+            if (local_slots[i].is_mouse) {
                 InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
                 for (int b=0; b<burst; b++) {
-                    ms.state = g_aslots[i].mouse_dn;
+                    ms.state = local_slots[i].mouse_dn;
                     interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
-                    ms.state = g_aslots[i].mouse_up;
+                    ms.state = local_slots[i].mouse_up;
                     interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
                     local_count++;
                 }
             } else {
-                ibatch[0].code=g_aslots[i].scan; ibatch[0].state=g_aslots[i].flags_dn;
-                ibatch[1].code=g_aslots[i].scan; ibatch[1].state=g_aslots[i].flags_up;
+                ibatch[0].code=local_slots[i].scan; ibatch[0].state=local_slots[i].flags_dn;
+                ibatch[1].code=local_slots[i].scan; ibatch[1].state=local_slots[i].flags_up;
                 for (int b=0; b<burst; b++) { interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2); local_count++; }
             }
         }
@@ -774,7 +828,7 @@ static DWORD g_last_toggle_tick = 0;
 
 static void toggle_active(void) {
     DWORD now = GetTickCount();
-    if (now - g_last_toggle_tick < 300) return;
+    if (now - g_last_toggle_tick < TOGGLE_DEBOUNCE_MS) return;
     g_last_toggle_tick = now;
     if (!g_drv_ok) {
         MessageBoxW(g_hwnd, L"Interception \x9A71\x52A8\x672A\x5C31\x7EEA\xFF01", L"\x9519\x8BEF", MB_ICONERROR);
@@ -803,7 +857,7 @@ static void toggle_game_mode(HWND hwnd) {
         EnumChildWindows(hwnd, show_child_proc, SW_HIDE);
         SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
         SetWindowLongW(hwnd, GWL_EXSTYLE, WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW);
-        SetLayeredWindowAttributes(hwnd, 0, 90, LWA_ALPHA);
+        SetLayeredWindowAttributes(hwnd, 0, GAME_ALPHA, LWA_ALPHA);
         int x=g_game_x, y=g_game_y;
         if (x<0||y<0) { x=g_normal_rect.left; y=g_normal_rect.top; }
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, g_game_w, g_game_h, SWP_FRAMECHANGED);
@@ -947,55 +1001,48 @@ static LRESULT CALLBACK btn_repeat_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 /* ================================================================== */
 
 static void paint_keyboard(HDC hdc) {
-    HFONT hf = CreateFontW(12, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
-    HFONT old = (HFONT)SelectObject(hdc, hf);
+    HFONT old = (HFONT)SelectObject(hdc, g_font_kb);
     SetBkMode(hdc, TRANSPARENT);
 
     for (int i = 0; i < (int)N_KEYS; i++) {
         KeyRect *kr = &g_krects[i];
         int vk = kr->vk;
-        COLORREF fill, text;
+        HBRUSH fill_br; COLORREF text;
 
         if (is_skippable(vk)) {
-            fill = RGB(100,100,100); text = RGB(180,180,180);
+            fill_br = g_br_skip; text = RGB(180,180,180);
         } else if (g_mode == MODE_HOLD) {
-            if (vk > 0 && vk < 256 && g_exclude[vk]) { fill = RGB(200,60,60); text = RGB(255,255,255); }
-            else { fill = RGB(220,140,20); text = RGB(255,255,255); }
+            if (vk > 0 && vk < 256 && g_exclude[vk]) { fill_br = g_br_excl; text = RGB(255,255,255); }
+            else { fill_br = g_br_hold; text = RGB(255,255,255); }
         } else if (g_mode == MODE_CUSTOM) {
-            if (vk > 0 && vk < 256 && g_custom_keys[vk]) { fill = RGB(50,170,50); text = RGB(255,255,255); }
-            else { fill = RGB(180,180,180); text = RGB(40,40,40); }
+            if (vk > 0 && vk < 256 && g_custom_keys[vk]) { fill_br = g_br_custom; text = RGB(255,255,255); }
+            else { fill_br = g_br_unsel; text = RGB(40,40,40); }
         } else {
-            BOOL is_custom = (vk > 0 && vk < 256 && g_custom_keys[vk]);
-            BOOL is_excl   = (vk > 0 && vk < 256 && g_exclude[vk]);
-            if (is_custom)     { fill = RGB(50,170,50); text = RGB(255,255,255); }
-            else if (!is_excl) { fill = RGB(220,140,20); text = RGB(255,255,255); }
-            else               { fill = RGB(200,60,60); text = RGB(255,255,255); }
+            BOOL is_cust = (vk > 0 && vk < 256 && g_custom_keys[vk]);
+            BOOL is_excl = (vk > 0 && vk < 256 && g_exclude[vk]);
+            if (is_cust)       { fill_br = g_br_custom; text = RGB(255,255,255); }
+            else if (!is_excl) { fill_br = g_br_hold;   text = RGB(255,255,255); }
+            else               { fill_br = g_br_excl;   text = RGB(255,255,255); }
         }
 
-        HBRUSH hb = CreateSolidBrush(fill);
         RECT r = kr->rc;
-        FillRect(hdc, &r, hb);
-        DeleteObject(hb);
+        FillRect(hdc, &r, fill_br);
 
-        HPEN hp = CreatePen(PS_SOLID, 1, RGB(60,60,60));
-        HPEN op = (HPEN)SelectObject(hdc, hp);
+        HPEN op = (HPEN)SelectObject(hdc, g_pen_border);
         MoveToEx(hdc, r.left, r.top, NULL); LineTo(hdc, r.right-1, r.top);
         LineTo(hdc, r.right-1, r.bottom-1); LineTo(hdc, r.left, r.bottom-1);
         LineTo(hdc, r.left, r.top);
-        SelectObject(hdc, op); DeleteObject(hp);
+        SelectObject(hdc, op);
 
         SetTextColor(hdc, text);
         DrawTextW(hdc, kr->label, -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }
 
-    SelectObject(hdc, old); DeleteObject(hf);
+    SelectObject(hdc, old);
 }
 
 static void paint_keyboard_legend(HDC hdc, int y) {
-    HFONT hf = CreateFontW(13, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
-    HFONT old = (HFONT)SelectObject(hdc, hf);
+    HFONT old = (HFONT)SelectObject(hdc, g_font_legend);
     SetBkMode(hdc, TRANSPARENT);
     int x = KB_X;
     RECT sq;
@@ -1004,33 +1051,33 @@ static void paint_keyboard_legend(HDC hdc, int y) {
     SetTextColor(hdc, RGB(0,0,0));
 
     if (g_mode == MODE_HOLD) {
-        HBRUSH hb = CreateSolidBrush(RGB(220,140,20)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_hold);
         TextOutW(hdc, x+16, y-1, L"\x8FDE\x53D1", 2);
         x += 70; sq.left=x; sq.right=x+12;
-        hb = CreateSolidBrush(RGB(200,60,60)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_excl);
         TextOutW(hdc, x+16, y-1, L"\x4E0D\x8FDE\x53D1", 3);
     } else if (g_mode == MODE_CUSTOM) {
-        HBRUSH hb = CreateSolidBrush(RGB(50,170,50)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_custom);
         TextOutW(hdc, x+16, y-1, L"\x5DF2\x9009", 2);
         x += 70; sq.left=x; sq.right=x+12;
-        hb = CreateSolidBrush(RGB(180,180,180)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_unsel);
         TextOutW(hdc, x+16, y-1, L"\x672A\x9009", 2);
     } else {
-        HBRUSH hb = CreateSolidBrush(RGB(50,170,50)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_custom);
         TextOutW(hdc, x+16, y-1, L"\x6307\x5B9A", 2);
         x += 60; sq.left=x; sq.right=x+12;
-        hb = CreateSolidBrush(RGB(220,140,20)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_hold);
         TextOutW(hdc, x+16, y-1, L"\x6309\x4F4F", 2);
         x += 60; sq.left=x; sq.right=x+12;
-        hb = CreateSolidBrush(RGB(200,60,60)); FillRect(hdc, &sq, hb); DeleteObject(hb);
+        FillRect(hdc, &sq, g_br_excl);
         TextOutW(hdc, x+16, y-1, L"\x6392\x9664", 2);
     }
 
     x += 85; sq.left=x; sq.right=x+12;
-    HBRUSH hb2 = CreateSolidBrush(RGB(100,100,100)); FillRect(hdc, &sq, hb2); DeleteObject(hb2);
+    FillRect(hdc, &sq, g_br_skip);
     TextOutW(hdc, x+16, y-1, L"\x70ED\x952E", 2);
 
-    SelectObject(hdc, old); DeleteObject(hf);
+    SelectObject(hdc, old);
 }
 
 static void paint(HWND hwnd) {
@@ -1046,9 +1093,7 @@ static void paint(HWND hwnd) {
     if (g_game_mode) {
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
         SetBkMode(hdc, TRANSPARENT);
-        HFONT hf = CreateFontW(17, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
-        HFONT old = (HFONT)SelectObject(hdc, hf);
+        HFONT old = (HFONT)SelectObject(hdc, g_font_game);
         WCHAR t[256]; int y=10, lh=22, x=8;
         if (g_active) { SetTextColor(hdc, RGB(0,255,0)); lstrcpyW(t, L"\x72B6\x6001: ON"); }
         else { SetTextColor(hdc, RGB(255,60,60)); lstrcpyW(t, L"\x72B6\x6001: OFF"); }
@@ -1065,15 +1110,14 @@ static void paint(HWND hwnd) {
         if (g_active&&pps>0) { SetTextColor(hdc,RGB(0,255,100)); wsprintfW(t,L"\x901F\x5EA6: %ld/s",pps); }
         else { SetTextColor(hdc,RGB(120,120,120)); lstrcpyW(t,L"\x901F\x5EA6: --"); }
         TextOutW(hdc, x, y, t, lstrlenW(t));
-        SelectObject(hdc, old); DeleteObject(hf);
+        SelectObject(hdc, old);
     } else {
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
         RECT kbBg;
         kbBg.left = KB_X - 5; kbBg.top = KB_Y - 8;
         kbBg.right = KB_X + 96*KU/4 + 5; kbBg.bottom = KB_Y + 26*KU/4 + 30;
-        HBRUSH bgbr = CreateSolidBrush(RGB(240,240,240));
-        FillRect(hdc, &kbBg, bgbr); DeleteObject(bgbr);
+        FillRect(hdc, &kbBg, g_br_kbbg);
 
         paint_keyboard(hdc);
         paint_keyboard_legend(hdc, KB_Y + 26*KU/4 + 8);
@@ -1102,8 +1146,7 @@ static HWND make_button(HWND parent, int id, const WCHAR *text, int x, int y, in
 }
 
 static void create_controls(HWND hwnd) {
-    HFONT hf = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+    HFONT hf = g_font_ui;
     HWND lbl;
     int y = KB_Y + 26*KU/4 + 35;
 
@@ -1203,7 +1246,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
         RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk);
-        SetTimer(hwnd, IDT_UI, 200, NULL);
+        SetTimer(hwnd, IDT_UI, UI_TIMER_MS, NULL);
         create_controls(hwnd);
         return 0;
 
@@ -1378,11 +1421,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
         return 1;
     }
 
+    InitializeCriticalSection(&g_cs_active);
     init_exclude_defaults();
     init_custom_keys_defaults();
     load_config();
     init_interception();
     init_keyrects();
+    init_gdi_cache();
 
     if (!g_drv_ok) try_auto_install();
     if (g_ctx) g_ithread = CreateThread(NULL, 0, intercept_proc, NULL, 0, NULL);
@@ -1424,8 +1469,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     if (g_kbhook) UnhookWindowsHookEx(g_kbhook);
     release_toggled();
     if (g_rthread) { WaitForSingleObject(g_rthread, 2000); CloseHandle(g_rthread); }
-    if (g_ithread) { WaitForSingleObject(g_ithread, 500);  CloseHandle(g_ithread); }
+    if (g_ithread) { WaitForSingleObject(g_ithread, 1000); CloseHandle(g_ithread); }
     if (g_ctx) interception_destroy_context(g_ctx);
-    if (g_dll) FreeLibrary(g_dll);
+    cleanup_gdi_cache();
+    DeleteCriticalSection(&g_cs_active);
+    if (g_dll) { FreeLibrary(g_dll); g_dll = NULL; }
+    DeleteFileW(g_dll_path);
     return 0;
 }
