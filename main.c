@@ -469,6 +469,16 @@ static int kid_to_vk(int kid) {
         case 0x38: return VK_LMENU;
         case 0x2A: return VK_LSHIFT;
         case 0x36: return VK_RSHIFT;
+        case 0x47: return VK_NUMPAD7;
+        case 0x48: return VK_NUMPAD8;
+        case 0x49: return VK_NUMPAD9;
+        case 0x4B: return VK_NUMPAD4;
+        case 0x4D: return VK_NUMPAD6;
+        case 0x4F: return VK_NUMPAD1;
+        case 0x50: return VK_NUMPAD2;
+        case 0x51: return VK_NUMPAD3;
+        case 0x52: return VK_NUMPAD0;
+        case 0x53: return VK_DECIMAL;
         }
     }
     return (int)MapVirtualKeyW(sc, MAPVK_VSC_TO_VK);
