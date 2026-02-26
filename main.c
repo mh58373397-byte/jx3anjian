@@ -32,6 +32,7 @@ typedef InterceptionDevice       (*PFN_wait_with_timeout)(InterceptionContext, u
 typedef int                      (*PFN_receive)(InterceptionContext, InterceptionDevice, InterceptionStroke*, unsigned int);
 typedef int                      (*PFN_send)(InterceptionContext, InterceptionDevice, const InterceptionStroke*, unsigned int);
 typedef int                      (*PFN_is_keyboard)(InterceptionDevice);
+typedef int                      (*PFN_is_mouse)(InterceptionDevice);
 
 static PFN_create_context     pfn_create_context;
 static PFN_destroy_context    pfn_destroy_context;
@@ -41,6 +42,7 @@ static PFN_wait_with_timeout  pfn_wait_with_timeout;
 static PFN_receive            pfn_receive;
 static PFN_send               pfn_send;
 static PFN_is_keyboard        pfn_is_keyboard;
+static PFN_is_mouse           pfn_is_mouse;
 
 #define interception_create_context     pfn_create_context
 #define interception_destroy_context    pfn_destroy_context
@@ -50,6 +52,7 @@ static PFN_is_keyboard        pfn_is_keyboard;
 #define interception_receive            pfn_receive
 #define interception_send               pfn_send
 #define interception_is_keyboard        pfn_is_keyboard
+#define interception_is_mouse          pfn_is_mouse
 
 static HMODULE g_dll = NULL;
 
@@ -91,9 +94,10 @@ static BOOL load_interception_dll(void) {
     pfn_receive           = (PFN_receive)          GetProcAddress(g_dll, "interception_receive");
     pfn_send              = (PFN_send)             GetProcAddress(g_dll, "interception_send");
     pfn_is_keyboard       = (PFN_is_keyboard)      GetProcAddress(g_dll, "interception_is_keyboard");
+    pfn_is_mouse          = (PFN_is_mouse)         GetProcAddress(g_dll, "interception_is_mouse");
     return pfn_create_context && pfn_destroy_context && pfn_set_filter &&
            pfn_get_hardware_id && pfn_wait_with_timeout && pfn_receive &&
-           pfn_send && pfn_is_keyboard;
+           pfn_send && pfn_is_keyboard && pfn_is_mouse;
 }
 
 /* ================================================================== */
@@ -129,7 +133,12 @@ static BOOL load_interception_dll(void) {
 #define IDM_GM_EXIT        202
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
-#define MAX_KID 0x200
+#define MID_LBUTTON   0x200
+#define MID_RBUTTON   0x201
+#define MID_MBUTTON   0x202
+#define MID_XBUTTON1  0x203
+#define MID_XBUTTON2  0x204
+#define MAX_KID       0x205
 #define MODE_HOLD   0
 #define MODE_CUSTOM 1
 #define MODE_HYBRID 2
@@ -176,7 +185,9 @@ static int kid_to_vk(int kid);
 #define MAX_ACTIVE 16
 typedef struct {
     int kid, vk;
+    BOOL is_mouse;
     unsigned short scan, flags_dn, flags_up;
+    unsigned short mouse_dn, mouse_up;
 } ActiveSlot;
 static volatile ActiveSlot g_aslots[MAX_ACTIVE];
 static volatile int        g_active_count = 0;
@@ -188,11 +199,22 @@ static void active_add(int kid) {
     if (g_active_count >= MAX_ACTIVE) return;
     int vk = kid_to_vk(kid);
     if (vk <= 0) return;
-    ActiveSlot s;
-    s.kid = kid; s.vk = vk;
+    ActiveSlot s; memset(&s, 0, sizeof(s));
+    s.kid = kid; s.vk = vk; s.is_mouse = FALSE;
     s.scan = (unsigned short)(kid & 0xFF);
     s.flags_dn = (kid & 0x100) ? INTERCEPTION_KEY_E0 : 0;
     s.flags_up = s.flags_dn | INTERCEPTION_KEY_UP;
+    g_aslots[g_active_count] = s;
+    g_active_count++;
+}
+
+static void active_add_mouse(int mid, int vk, unsigned short dn, unsigned short up) {
+    for (int i = 0; i < g_active_count; i++)
+        if (g_aslots[i].kid == mid) return;
+    if (g_active_count >= MAX_ACTIVE) return;
+    ActiveSlot s; memset(&s, 0, sizeof(s));
+    s.kid = mid; s.vk = vk; s.is_mouse = TRUE;
+    s.mouse_dn = dn; s.mouse_up = up;
     g_aslots[g_active_count] = s;
     g_active_count++;
 }
@@ -297,6 +319,13 @@ static const KeySpec g_keyspecs[] = {
     {VK_RIGHT,   70,22, 4,4, L"\x2192"},
     {VK_NUMPAD0, 76,22, 8,4, L"0"},
     {VK_DECIMAL, 84,22, 4,4, L"."},
+
+    /* Mouse buttons (r4=0, above numpad) */
+    {VK_LBUTTON,  76, 0, 4,4, L"ML"},
+    {VK_RBUTTON,  80, 0, 4,4, L"MR"},
+    {VK_MBUTTON,  84, 0, 4,4, L"MM"},
+    {VK_XBUTTON1, 88, 0, 4,4, L"X1"},
+    {VK_XBUTTON2, 92, 0, 4,4, L"X2"},
 };
 
 #define N_KEYS (sizeof(g_keyspecs)/sizeof(g_keyspecs[0]))
@@ -451,6 +480,13 @@ static BOOL is_skippable(int vk) {
 static BOOL is_excluded(int vk) { return (vk > 0 && vk < 256 && g_exclude[vk]); }
 
 static int kid_to_vk(int kid) {
+    switch (kid) {
+    case MID_LBUTTON:  return VK_LBUTTON;
+    case MID_RBUTTON:  return VK_RBUTTON;
+    case MID_MBUTTON:  return VK_MBUTTON;
+    case MID_XBUTTON1: return VK_XBUTTON1;
+    case MID_XBUTTON2: return VK_XBUTTON2;
+    }
     unsigned short sc = (unsigned short)(kid & 0xFF);
     if (kid & 0x100) {
         switch (sc) {
@@ -485,6 +521,13 @@ static int kid_to_vk(int kid) {
 }
 
 static void get_vk_name(int vk, WCHAR *buf, int buflen) {
+    switch (vk) {
+    case VK_LBUTTON:  lstrcpynW(buf, L"M.Left", buflen); return;
+    case VK_RBUTTON:  lstrcpynW(buf, L"M.Right", buflen); return;
+    case VK_MBUTTON:  lstrcpynW(buf, L"M.Mid", buflen); return;
+    case VK_XBUTTON1: lstrcpynW(buf, L"M.X1", buflen); return;
+    case VK_XBUTTON2: lstrcpynW(buf, L"M.X2", buflen); return;
+    }
     UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
     if (sc && GetKeyNameTextW((LONG)(sc << 16), buf, buflen) > 0) return;
     wsprintfW(buf, L"VK 0x%02X", vk);
@@ -505,6 +548,8 @@ static void init_exclude_defaults(void) {
     g_exclude[VK_LMENU]=TRUE; g_exclude[VK_RMENU]=TRUE;
     g_exclude[VK_NUMLOCK]=TRUE; g_exclude[VK_SCROLL]=TRUE;
     for (int vk = VK_F1; vk <= VK_F12; vk++) g_exclude[vk] = TRUE;
+    g_exclude[VK_LBUTTON]=TRUE; g_exclude[VK_RBUTTON]=TRUE;
+    g_exclude[VK_MBUTTON]=TRUE;
 }
 
 static void init_custom_keys_defaults(void) {
@@ -545,14 +590,31 @@ static int build_toggled_list(WCHAR *buf, int bufmax, int max_show) {
 /*                          THREADS                                    */
 /* ================================================================== */
 
+static unsigned short mid_to_mouse_up(int mid) {
+    switch (mid) {
+    case MID_LBUTTON:  return INTERCEPTION_MOUSE_LEFT_BUTTON_UP;
+    case MID_RBUTTON:  return INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;
+    case MID_MBUTTON:  return INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;
+    case MID_XBUTTON1: return INTERCEPTION_MOUSE_BUTTON_4_UP;
+    case MID_XBUTTON2: return INTERCEPTION_MOUSE_BUTTON_5_UP;
+    }
+    return 0;
+}
+
 static void release_toggled(void) {
     for (int kid=0; kid<MAX_KID; kid++) {
         if (g_toggled[kid] && g_tdev[kid] && g_drv_ok) {
-            InterceptionKeyStroke up_ks;
-            up_ks.code = (unsigned short)(kid & 0xFF);
-            up_ks.state = INTERCEPTION_KEY_UP | g_tflags[kid];
-            up_ks.information = 0;
-            interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&up_ks, 1);
+            if (kid >= MID_LBUTTON && kid <= MID_XBUTTON2) {
+                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
+                ms.state = mid_to_mouse_up(kid);
+                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&ms, 1);
+            } else {
+                InterceptionKeyStroke up_ks;
+                up_ks.code = (unsigned short)(kid & 0xFF);
+                up_ks.state = INTERCEPTION_KEY_UP | g_tflags[kid];
+                up_ks.information = 0;
+                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&up_ks, 1);
+            }
         }
     }
     memset((void *)g_toggled, 0, sizeof(g_toggled));
@@ -560,9 +622,24 @@ static void release_toggled(void) {
     g_active_count = 0;
 }
 
+static const struct { int mid; int vk; unsigned short dn; unsigned short up; } g_mouse_btns[] = {
+    {MID_LBUTTON,  VK_LBUTTON,  INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN,   INTERCEPTION_MOUSE_LEFT_BUTTON_UP},
+    {MID_RBUTTON,  VK_RBUTTON,  INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN,  INTERCEPTION_MOUSE_RIGHT_BUTTON_UP},
+    {MID_MBUTTON,  VK_MBUTTON,  INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN, INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP},
+    {MID_XBUTTON1, VK_XBUTTON1, INTERCEPTION_MOUSE_BUTTON_4_DOWN,      INTERCEPTION_MOUSE_BUTTON_4_UP},
+    {MID_XBUTTON2, VK_XBUTTON2, INTERCEPTION_MOUSE_BUTTON_5_DOWN,      INTERCEPTION_MOUSE_BUTTON_5_UP},
+};
+#define N_MOUSE_BTNS (sizeof(g_mouse_btns)/sizeof(g_mouse_btns[0]))
+
 static DWORD WINAPI intercept_proc(LPVOID p) {
     (void)p;
     interception_set_filter(g_ctx, interception_is_keyboard, INTERCEPTION_FILTER_KEY_ALL);
+    interception_set_filter(g_ctx, interception_is_mouse,
+        INTERCEPTION_FILTER_MOUSE_LEFT_BUTTON_DOWN | INTERCEPTION_FILTER_MOUSE_LEFT_BUTTON_UP |
+        INTERCEPTION_FILTER_MOUSE_RIGHT_BUTTON_DOWN | INTERCEPTION_FILTER_MOUSE_RIGHT_BUTTON_UP |
+        INTERCEPTION_FILTER_MOUSE_MIDDLE_BUTTON_DOWN | INTERCEPTION_FILTER_MOUSE_MIDDLE_BUTTON_UP |
+        INTERCEPTION_FILTER_MOUSE_BUTTON_4_DOWN | INTERCEPTION_FILTER_MOUSE_BUTTON_4_UP |
+        INTERCEPTION_FILTER_MOUSE_BUTTON_5_DOWN | INTERCEPTION_FILTER_MOUSE_BUTTON_5_UP);
     while (!g_quit) {
         InterceptionDevice dev = interception_wait_with_timeout(g_ctx, 200);
         if (dev == 0) continue;
@@ -571,7 +648,7 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
         if (interception_is_keyboard(dev)) {
             InterceptionKeyStroke *ks = (InterceptionKeyStroke *)&stroke;
             int kid = KID(ks->code, ks->state);
-            if (kid >= 0 && kid < MAX_KID) {
+            if (kid >= 0 && kid < 0x200) {
                 int vk = kid_to_vk(kid);
                 BOOL is_hk = (vk == g_hk_toggle_vk || vk == g_hk_game_vk);
                 if (ks->state & INTERCEPTION_KEY_UP) {
@@ -592,6 +669,31 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                     g_held[kid]=TRUE; g_hdev[kid]=dev;
                     g_hflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP;
                     if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) active_add(kid);
+                }
+            }
+        } else if (interception_is_mouse(dev)) {
+            InterceptionMouseStroke *ms = (InterceptionMouseStroke *)&stroke;
+            for (int b = 0; b < (int)N_MOUSE_BTNS; b++) {
+                int mid = g_mouse_btns[b].mid, vk = g_mouse_btns[b].vk;
+                if (ms->state & g_mouse_btns[b].up) {
+                    g_held[mid]=FALSE; g_hdev[mid]=0;
+                    if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
+                        if (!(g_mode==MODE_HYBRID && g_toggled[mid]))
+                            active_remove(mid);
+                    }
+                }
+                if (ms->state & g_mouse_btns[b].dn) {
+                    if (!is_excluded(vk)) {
+                        if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[mid]) {
+                            if (vk>0 && vk<256 && g_custom_keys[vk]) {
+                                if (g_toggled[mid]) { g_toggled[mid]=FALSE; g_tdev[mid]=0; active_remove(mid); }
+                                else { g_toggled[mid]=TRUE; g_tdev[mid]=dev; active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up); }
+                            }
+                        }
+                        g_held[mid]=TRUE; g_hdev[mid]=dev;
+                        if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)
+                            active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up);
+                    }
                 }
             }
         }
@@ -640,10 +742,21 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             else if (mode==MODE_HOLD) idev = g_hdev[kid];
             else idev = g_tdev[kid];
             if (!idev) continue;
-            ibatch[0].code=g_aslots[i].scan; ibatch[0].state=g_aslots[i].flags_dn;
-            ibatch[1].code=g_aslots[i].scan; ibatch[1].state=g_aslots[i].flags_up;
             int burst = (delay<=100) ? g_burst : 1;
-            for (int b=0; b<burst; b++) { interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2); local_count++; }
+            if (g_aslots[i].is_mouse) {
+                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
+                for (int b=0; b<burst; b++) {
+                    ms.state = g_aslots[i].mouse_dn;
+                    interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
+                    ms.state = g_aslots[i].mouse_up;
+                    interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
+                    local_count++;
+                }
+            } else {
+                ibatch[0].code=g_aslots[i].scan; ibatch[0].state=g_aslots[i].flags_dn;
+                ibatch[1].code=g_aslots[i].scan; ibatch[1].state=g_aslots[i].flags_up;
+                for (int b=0; b<burst; b++) { interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2); local_count++; }
+            }
         }
         LARGE_INTEGER now; QueryPerformanceCounter(&now);
         if (now.QuadPart - last.QuadPart >= freq.QuadPart) { g_pps=local_count; local_count=0; last=now; }
@@ -958,7 +1071,7 @@ static void paint(HWND hwnd) {
 
         RECT kbBg;
         kbBg.left = KB_X - 5; kbBg.top = KB_Y - 8;
-        kbBg.right = KB_X + 92*KU/4 + 5; kbBg.bottom = KB_Y + 26*KU/4 + 30;
+        kbBg.right = KB_X + 96*KU/4 + 5; kbBg.bottom = KB_Y + 26*KU/4 + 30;
         HBRUSH bgbr = CreateSolidBrush(RGB(240,240,240));
         FillRect(hdc, &kbBg, bgbr); DeleteObject(bgbr);
 
@@ -1282,7 +1395,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     wc.lpszClassName = L"AutoKeyClass";
     RegisterClassW(&wc);
 
-    int cw = KB_X + 92*KU/4 + 10;
+    int cw = KB_X + 96*KU/4 + 10;
     int ch = 410;
     RECT wr = {0, 0, cw, ch};
     AdjustWindowRectEx(&wr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, FALSE, WS_EX_TOPMOST);
