@@ -154,9 +154,9 @@ static InterceptionContext g_ctx      = NULL;
 static BOOL                g_drv_ok   = FALSE;
 static volatile BOOL       g_active   = FALSE;
 static volatile BOOL       g_quit     = FALSE;
-static volatile int        g_delay    = 10000;
+static volatile int        g_delay    = 1000;
 static volatile int        g_burst    = 1;
-static volatile int        g_mode     = MODE_HOLD;
+static volatile int        g_mode     = MODE_HYBRID;
 static HANDLE              g_ithread  = NULL;
 static HANDLE              g_rthread  = NULL;
 static HWND                g_hwnd     = NULL;
@@ -173,7 +173,7 @@ static BOOL  g_custom_keys[256];
 static BOOL  g_game_mode    = FALSE;
 static HHOOK g_kbhook       = NULL;
 static RECT  g_normal_rect;
-static int   g_game_x = 1233, g_game_y = 147, g_game_w = 200, g_game_h = 80;
+static int   g_game_x = 1295, g_game_y = 253, g_game_w = 200, g_game_h = 80;
 
 static int   g_hk_toggle_vk = VK_F1;
 static int   g_hk_game_vk   = VK_F9;
@@ -584,26 +584,33 @@ static void get_vk_name(int vk, WCHAR *buf, int buflen) {
 
 static void init_exclude_defaults(void) {
     memset(g_exclude, 0, sizeof(g_exclude));
-    g_exclude['W']=TRUE; g_exclude['A']=TRUE; g_exclude['S']=TRUE; g_exclude['D']=TRUE;
-    g_exclude[VK_BACK]=TRUE; g_exclude[VK_TAB]=TRUE; g_exclude[VK_RETURN]=TRUE;
-    g_exclude[VK_SHIFT]=TRUE; g_exclude[VK_PAUSE]=TRUE;
-    g_exclude[VK_CAPITAL]=TRUE; g_exclude[VK_ESCAPE]=TRUE; g_exclude[VK_SPACE]=TRUE;
-    g_exclude[VK_PRIOR]=TRUE; g_exclude[VK_NEXT]=TRUE;
-    g_exclude[VK_END]=TRUE; g_exclude[VK_HOME]=TRUE;
-    g_exclude[VK_SNAPSHOT]=TRUE; g_exclude[VK_INSERT]=TRUE; g_exclude[VK_DELETE]=TRUE;
-    g_exclude[VK_LWIN]=TRUE; g_exclude[VK_RWIN]=TRUE; g_exclude[VK_APPS]=TRUE;
-    g_exclude[VK_LSHIFT]=TRUE; g_exclude[VK_RSHIFT]=TRUE;
-    g_exclude[VK_LCONTROL]=TRUE; g_exclude[VK_RCONTROL]=TRUE;
-    g_exclude[VK_LMENU]=TRUE; g_exclude[VK_RMENU]=TRUE;
-    g_exclude[VK_NUMLOCK]=TRUE; g_exclude[VK_SCROLL]=TRUE;
-    for (int vk = VK_F1; vk <= VK_F12; vk++) g_exclude[vk] = TRUE;
-    g_exclude[VK_LBUTTON]=TRUE; g_exclude[VK_RBUTTON]=TRUE;
-    g_exclude[VK_MBUTTON]=TRUE;
+    static const int def_excl[] = {
+        VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+        VK_BACK, VK_TAB, VK_RETURN, VK_SHIFT, VK_PAUSE, VK_CAPITAL,
+        VK_ESCAPE, VK_SPACE,
+        VK_PRIOR, VK_NEXT, VK_END, VK_HOME,
+        VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN,
+        VK_SNAPSHOT, VK_INSERT, VK_DELETE,
+        '0', '7', '8', '9',
+        'A', 'B', 'D', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
+        'S', 'U', 'W', 'Y',
+        VK_LWIN, VK_RWIN, VK_APPS,
+        VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4,
+        VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9,
+        VK_MULTIPLY, VK_ADD, VK_SUBTRACT, VK_DECIMAL, VK_DIVIDE,
+        VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
+        VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12,
+        VK_NUMLOCK, VK_SCROLL,
+        VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU,
+        VK_OEM_1, VK_OEM_PLUS, VK_OEM_COMMA, VK_OEM_MINUS,
+        VK_OEM_PERIOD, VK_OEM_2, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
+    };
+    for (int i = 0; i < (int)(sizeof(def_excl)/sizeof(def_excl[0])); i++)
+        if (def_excl[i] > 0 && def_excl[i] < 256) g_exclude[def_excl[i]] = TRUE;
 }
 
 static void init_custom_keys_defaults(void) {
     memset(g_custom_keys, 0, sizeof(g_custom_keys));
-    g_custom_keys['F']=TRUE;
 }
 
 static int build_active_list(WCHAR *buf, int bufmax, int max_show) {
@@ -1449,7 +1456,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
     /* UTF-8: 丐帮高手v3 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv3";
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv3.1";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoKeyClass",
