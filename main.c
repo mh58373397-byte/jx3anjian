@@ -922,8 +922,13 @@ static void paint_keyboard_legend(HDC hdc, int y) {
 
 static void paint(HWND hwnd) {
     PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
+    HDC hdcScreen = BeginPaint(hwnd, &ps);
     RECT rc; GetClientRect(hwnd, &rc);
+    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+
+    HDC hdc = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, w, h);
+    HBITMAP obm = (HBITMAP)SelectObject(hdc, hbm);
 
     if (g_game_mode) {
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
@@ -948,21 +953,23 @@ static void paint(HWND hwnd) {
         else { SetTextColor(hdc,RGB(120,120,120)); lstrcpyW(t,L"\x901F\x5EA6: --"); }
         TextOutW(hdc, x, y, t, lstrlenW(t));
         SelectObject(hdc, old); DeleteObject(hf);
-        EndPaint(hwnd, &ps);
-        return;
+    } else {
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+
+        RECT kbBg;
+        kbBg.left = KB_X - 5; kbBg.top = KB_Y - 8;
+        kbBg.right = KB_X + 92*KU/4 + 5; kbBg.bottom = KB_Y + 26*KU/4 + 30;
+        HBRUSH bgbr = CreateSolidBrush(RGB(240,240,240));
+        FillRect(hdc, &kbBg, bgbr); DeleteObject(bgbr);
+
+        paint_keyboard(hdc);
+        paint_keyboard_legend(hdc, KB_Y + 26*KU/4 + 8);
     }
 
-    FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
-
-    RECT kbBg;
-    kbBg.left = KB_X - 5; kbBg.top = KB_Y - 8;
-    kbBg.right = KB_X + 92*KU/4 + 5; kbBg.bottom = KB_Y + 26*KU/4 + 30;
-    HBRUSH bgbr = CreateSolidBrush(RGB(240,240,240));
-    FillRect(hdc, &kbBg, bgbr); DeleteObject(bgbr);
-
-    paint_keyboard(hdc);
-    paint_keyboard_legend(hdc, KB_Y + 26*KU/4 + 8);
-
+    BitBlt(hdcScreen, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
+    SelectObject(hdc, obm);
+    DeleteObject(hbm);
+    DeleteDC(hdc);
     EndPaint(hwnd, &ps);
 }
 
@@ -1199,6 +1206,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkMode(hdcCtl, TRANSPARENT);
         return (LRESULT)GetStockObject(WHITE_BRUSH);
     }
+
+    case WM_ERASEBKGND:
+        return 1;
 
     case WM_PAINT:
         paint(hwnd);
