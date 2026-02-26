@@ -1220,15 +1220,17 @@ static void create_controls(HWND hwnd) {
     g_orig_btn_proc = (WNDPROC)SetWindowLongPtrW(bdec, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     SetWindowLongPtrW(binc, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     y += 26;
-    g_chk_keylock = CreateWindowW(L"BUTTON", L"\x6309\x952E\x9501\x5B9A",
-        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+5, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_KEYLOCK, NULL, NULL);
-    SendMessageW(g_chk_keylock, WM_SETFONT, (WPARAM)hf, TRUE);
-    if (g_key_lock) SendMessageW(g_chk_keylock, BM_SETCHECK, BST_CHECKED, 0);
     g_lbl_burst = make_label(hwnd, IDC_LABEL_BURST, L"", 510, y, 190, 18, 0);
     SendMessageW(g_lbl_burst, WM_SETFONT, (WPARAM)hf, TRUE);
     y += 6;
     make_label(hwnd, 0, NULL, LP_X, y, LP_W, 2, SS_ETCHEDHORZ);
     y += 8;
+
+    g_chk_keylock = CreateWindowW(L"BUTTON", L"\x6309\x952E\x9501\x5B9A",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+5, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_KEYLOCK, NULL, NULL);
+    SendMessageW(g_chk_keylock, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_key_lock) SendMessageW(g_chk_keylock, BM_SETCHECK, BST_CHECKED, 0);
+    y += 24;
 
     g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 190, 18, 0);
     SendMessageW(g_lbl_status, WM_SETFONT, (WPARAM)hf, TRUE);
@@ -1485,7 +1487,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     RegisterClassW(&wc);
 
     int cw = KB_X + 96*KU/4 + 10;
-    int ch = 410;
+    int ch = 434;
     RECT wr = {0, 0, cw, ch};
     AdjustWindowRectEx(&wr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, FALSE, WS_EX_TOPMOST);
     int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
