@@ -13,6 +13,7 @@
 #define INTERCEPTION_STATIC
 #include "interception.h"
 #include "resource.h"
+#include "macro.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -37,12 +38,12 @@ typedef int                      (*PFN_is_mouse)(InterceptionDevice);
 static PFN_create_context     pfn_create_context;
 static PFN_destroy_context    pfn_destroy_context;
 static PFN_set_filter         pfn_set_filter;
-static PFN_get_hardware_id    pfn_get_hardware_id;
+PFN_get_hardware_id    pfn_get_hardware_id;
 static PFN_wait_with_timeout  pfn_wait_with_timeout;
 static PFN_receive            pfn_receive;
-static PFN_send               pfn_send;
-static PFN_is_keyboard        pfn_is_keyboard;
-static PFN_is_mouse           pfn_is_mouse;
+PFN_send               pfn_send;
+PFN_is_keyboard        pfn_is_keyboard;
+PFN_is_mouse           pfn_is_mouse;
 
 #define interception_create_context     pfn_create_context
 #define interception_destroy_context    pfn_destroy_context
@@ -131,6 +132,13 @@ static BOOL load_interception_dll(void) {
 #define IDC_CHK_KEYLOCK    121
 #define IDC_BTN_UNINSTALL  122
 #define IDC_CHK_TURBO      123
+#define IDC_BTN_MACRO      124
+#define IDC_CHK_PAUSE_HOLD 125
+#define IDC_CHK_MACRO_ACTIVE 126
+#define IDC_CHK_MACRO_NOSTART 127
+#define IDC_BTN_SOUND 128
+#define IDC_CHK_SWAP  129
+#define IDC_CHK_SWAP_NOSTART 130
 #define IDM_GM_TOGGLE      200
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
@@ -153,15 +161,15 @@ static BOOL load_interception_dll(void) {
 
 static CRITICAL_SECTION g_cs_active;
 
-static InterceptionContext g_ctx      = NULL;
-static BOOL                g_drv_ok   = FALSE;
+InterceptionContext g_ctx      = NULL;
+BOOL                g_drv_ok   = FALSE;
 static volatile BOOL       g_active   = FALSE;
 static volatile BOOL       g_quit     = FALSE;
 static volatile int        g_delay    = 1000;
 static volatile int        g_mode     = MODE_HOLD;
 static HANDLE              g_ithread  = NULL;
 static HANDLE              g_rthread  = NULL;
-static HWND                g_hwnd     = NULL;
+HWND                g_hwnd     = NULL;
 
 static volatile BOOL               g_held[MAX_KID];
 static volatile InterceptionDevice g_hdev[MAX_KID];
@@ -177,17 +185,30 @@ static HHOOK g_kbhook       = NULL;
 static RECT  g_normal_rect;
 static int   g_game_x = 1295, g_game_y = 253, g_game_w = 200, g_game_h = 80;
 
-static int   g_hk_toggle_vk = VK_F1;
-static int   g_hk_game_vk   = VK_F9;
+int   g_hk_toggle_vk = VK_F1;
+int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
 
 static BOOL  g_key_lock     = FALSE;
 static BOOL  g_turbo        = FALSE;
+static BOOL  g_pause_toggle_on_hold = FALSE;
+static BOOL  g_macro_active = FALSE;
+static BOOL  g_macro_no_start = FALSE;
+static BOOL  g_sound_enabled = TRUE;
+static BOOL  g_swap_enabled    = FALSE;
+static BOOL  g_swap_no_start  = FALSE;
+static int   g_key_swap[256];
+
+static int   g_drag_src_idx = -1;
+static int   g_drag_dst_idx = -1;
+static BOOL  g_drag_active  = FALSE;
 
 static HWND g_lbl_driver, g_lbl_status, g_lbl_delay, g_lbl_speed;
 static HWND g_lbl_repeat, g_lbl_hkname, g_lbl_gmhkname;
-static HWND g_btn_startstop, g_radio_hold, g_radio_toggle, g_radio_hybrid;
-static HWND g_chk_keylock, g_chk_turbo;
+static HWND g_radio_hold, g_radio_toggle, g_radio_hybrid;
+static HWND g_chk_keylock, g_chk_turbo, g_chk_pause_hold, g_chk_macro_active, g_chk_macro_nostart;
+static HWND g_chk_swap, g_chk_swap_nostart;
+static HWND g_btn_sound;
 
 static int     g_repeat_btn   = 0;
 static int     g_repeat_count = 0;
@@ -195,7 +216,7 @@ static WNDPROC g_orig_btn_proc = NULL;
 
 static HFONT  g_font_kb      = NULL;
 static HFONT  g_font_legend  = NULL;
-static HFONT  g_font_ui      = NULL;
+HFONT  g_font_ui      = NULL;
 static HFONT  g_font_game    = NULL;
 static HPEN   g_pen_border   = NULL;
 static HBRUSH g_br_excl      = NULL;
@@ -204,6 +225,10 @@ static HBRUSH g_br_custom    = NULL;
 static HBRUSH g_br_unsel     = NULL;
 static HBRUSH g_br_skip      = NULL;
 static HBRUSH g_br_kbbg      = NULL;
+static HBRUSH g_br_macro     = NULL;
+static HBRUSH g_br_swap      = NULL;
+static HBRUSH g_br_drag_src  = NULL;
+static HBRUSH g_br_drag_dst  = NULL;
 
 static HDC     g_paint_memdc  = NULL;
 static HBITMAP g_paint_bitmap = NULL;
@@ -223,11 +248,16 @@ static void init_gdi_cache(void) {
     g_br_unsel    = CreateSolidBrush(RGB(180,180,180));
     g_br_skip     = CreateSolidBrush(RGB(100,100,100));
     g_br_kbbg     = CreateSolidBrush(RGB(240,240,240));
+    g_br_macro    = CreateSolidBrush(RGB(50,120,200));
+    g_br_swap     = CreateSolidBrush(RGB(230,160,0));
+    g_br_drag_src = CreateSolidBrush(RGB(100,180,255));
+    g_br_drag_dst = CreateSolidBrush(RGB(255,100,100));
 }
 
 static void cleanup_gdi_cache(void) {
     HGDIOBJ objs[] = { g_font_kb, g_font_legend, g_font_ui, g_font_game, g_pen_border,
-                       g_br_excl, g_br_hold, g_br_custom, g_br_unsel, g_br_skip, g_br_kbbg };
+                       g_br_excl, g_br_hold, g_br_custom, g_br_unsel, g_br_skip, g_br_kbbg, g_br_macro,
+                       g_br_swap, g_br_drag_src, g_br_drag_dst };
     for (int i = 0; i < (int)(sizeof(objs)/sizeof(objs[0])); i++)
         if (objs[i]) DeleteObject(objs[i]);
     if (g_paint_memdc) {
@@ -249,7 +279,7 @@ typedef struct {
 static volatile ActiveSlot g_aslots[MAX_ACTIVE];
 static volatile int        g_active_count = 0;
 static volatile LONG       g_pps = 0;
-static LARGE_INTEGER       g_qpc_freq;
+LARGE_INTEGER       g_qpc_freq;
 
 static void active_add_ex(int kid, BOOL is_mouse, unsigned short mouse_dn, unsigned short mouse_up) {
     EnterCriticalSection(&g_cs_active);
@@ -420,11 +450,14 @@ static void get_exe_dir(WCHAR *buf, int buflen) {
     if (p) *(p + 1) = 0;
 }
 
-static void save_config(void) {
+void save_config(void) {
     WCHAR path[MAX_PATH];
     get_exe_dir(path, MAX_PATH);
     lstrcatW(path, L"config.json");
-    char buf[8192]; int pos = 0; int rem = (int)sizeof(buf);
+    int bufsize = 524288;
+    char *buf = (char*)malloc(bufsize);
+    if (!buf) return;
+    int pos = 0; int rem = bufsize;
     #define SCFG(fmt, ...) do { int n = snprintf(buf+pos, rem, fmt, __VA_ARGS__); if (n>0){pos+=n; rem-=n;} } while(0)
     SCFG("{\n  \"delay_us\": %d,\n  \"mode\": %d,\n", g_delay, g_mode);
     SCFG("  \"exclude\": [%s", "");
@@ -437,11 +470,30 @@ static void save_config(void) {
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
     SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
-    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d\n}\n", g_key_lock ? 1 : 0, g_turbo ? 1 : 0);
+    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n",
+         g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0);
+    SCFG("  \"key_swaps\": [%s", "");
+    {
+        int sfirst = 1;
+        for (int i = 1; i < 256 && rem > 20; i++) {
+            if (g_key_swap[i] && g_key_swap[i] > i) {
+                if (!sfirst) SCFG(",%s","");
+                SCFG("[%d,%d]", i, g_key_swap[i]);
+                sfirst = 0;
+            }
+        }
+    }
+    SCFG("],\n%s", "");
+    macro_save_config_to(buf, &pos, rem);
+    while (pos > 0 && (buf[pos-1] == '\n' || buf[pos-1] == ' ')) pos--;
+    if (pos > 0 && buf[pos-1] == ',') pos--;
+    buf[pos++] = '\n'; buf[pos++] = '}'; buf[pos++] = '\n';
     #undef SCFG
     HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-    DWORD written; WriteFile(hFile, buf, (DWORD)pos, &written, NULL); CloseHandle(hFile);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD written; WriteFile(hFile, buf, (DWORD)pos, &written, NULL); CloseHandle(hFile);
+    }
+    free(buf);
 }
 
 static void parse_int_array(const char *start, BOOL *arr, int arrlen) {
@@ -458,8 +510,12 @@ static void load_config(void) {
     WCHAR path[MAX_PATH]; get_exe_dir(path, MAX_PATH); lstrcatW(path, L"config.json");
     HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile == INVALID_HANDLE_VALUE) { save_config(); return; }
-    char buf[8192]; DWORD bytesRead;
-    ReadFile(hFile, buf, sizeof(buf)-1, &bytesRead, NULL); CloseHandle(hFile);
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    if (fileSize == 0 || fileSize > 10*1024*1024) { CloseHandle(hFile); return; }
+    char *buf = (char*)malloc(fileSize + 1);
+    if (!buf) { CloseHandle(hFile); return; }
+    DWORD bytesRead;
+    ReadFile(hFile, buf, fileSize, &bytesRead, NULL); CloseHandle(hFile);
     buf[bytesRead] = 0;
     char *p;
     p = strstr(buf, "\"delay_us\"");
@@ -479,6 +535,35 @@ static void load_config(void) {
     p = strstr(buf, "\"hk_game\"");   if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_game_vk=v; } }
     p = strstr(buf, "\"key_lock\""); if (p) { p = strchr(p, ':'); if (p) g_key_lock = (atoi(p+1) != 0); }
     p = strstr(buf, "\"turbo\"");    if (p) { p = strchr(p, ':'); if (p) g_turbo = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"pause_toggle_on_hold\""); if (p) { p = strchr(p, ':'); if (p) g_pause_toggle_on_hold = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"macro_active\""); if (p) { p = strchr(p, ':'); if (p) g_macro_active = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"macro_no_start\""); if (p) { p = strchr(p, ':'); if (p) g_macro_no_start = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"sound_enabled\""); if (p) { p = strchr(p, ':'); if (p) g_sound_enabled = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"swap_enabled\""); if (p) { p = strchr(p, ':'); if (p) g_swap_enabled = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"swap_no_start\""); if (p) { p = strchr(p, ':'); if (p) g_swap_no_start = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"key_swaps\"");
+    if (p) {
+        memset(g_key_swap, 0, sizeof(g_key_swap));
+        p = strchr(p, '['); if (p) p++;
+        while (p && *p && *p != ']') {
+            while (*p == ' ' || *p == ',' || *p == '\n' || *p == '\r') p++;
+            if (*p == '[') {
+                p++;
+                int a = atoi(p);
+                while (*p >= '0' && *p <= '9') p++;
+                while (*p == ' ' || *p == ',') p++;
+                int b = atoi(p);
+                while (*p >= '0' && *p <= '9') p++;
+                while (*p == ' ' || *p == ']') { if (*p == ']') { p++; break; } p++; }
+                if (a > 0 && a < 256 && b > 0 && b < 256 && a != b) {
+                    g_key_swap[a] = b;
+                    g_key_swap[b] = a;
+                }
+            } else if (*p != ']') p++;
+        }
+    }
+    macro_load_config_from(buf);
+    free(buf);
 }
 
 /* ================================================================== */
@@ -587,12 +672,78 @@ static void try_auto_install(void) {
 static BOOL is_skippable(int vk) {
     if (vk == 0) return TRUE;
     if (vk == g_hk_toggle_vk || vk == g_hk_game_vk) return TRUE;
+    if (g_macro_active && macro_is_bound_vk(vk)) return TRUE;
     return FALSE;
 }
 
 static BOOL is_excluded(int vk) { return (vk > 0 && vk < 256 && g_exclude[vk]); }
 
-static int kid_to_vk(int kid) {
+static BOOL is_mouse_vk(int vk) {
+    return vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON ||
+           vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
+}
+
+static void perform_key_swap(int vk_a, int vk_b) {
+    if (vk_a <= 0 || vk_a >= 256 || vk_b <= 0 || vk_b >= 256) return;
+    if (vk_a == vk_b) return;
+    if (is_skippable(vk_a) || is_skippable(vk_b)) return;
+    if (is_mouse_vk(vk_a) || is_mouse_vk(vk_b)) return;
+    int old_a = g_key_swap[vk_a];
+    int old_b = g_key_swap[vk_b];
+    if (old_a && old_a != vk_b) g_key_swap[old_a] = 0;
+    if (old_b && old_b != vk_a) g_key_swap[old_b] = 0;
+    if (old_a == vk_b) {
+        g_key_swap[vk_a] = 0;
+        g_key_swap[vk_b] = 0;
+    } else {
+        g_key_swap[vk_a] = vk_b;
+        g_key_swap[vk_b] = vk_a;
+    }
+    save_config();
+}
+
+static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0) {
+    *e0 = FALSE;
+    switch (vk) {
+    case VK_RCONTROL: *sc = 0x1D; *e0 = TRUE; return;
+    case VK_RMENU:    *sc = 0x38; *e0 = TRUE; return;
+    case VK_HOME:     *sc = 0x47; *e0 = TRUE; return;
+    case VK_UP:       *sc = 0x48; *e0 = TRUE; return;
+    case VK_PRIOR:    *sc = 0x49; *e0 = TRUE; return;
+    case VK_LEFT:     *sc = 0x4B; *e0 = TRUE; return;
+    case VK_RIGHT:    *sc = 0x4D; *e0 = TRUE; return;
+    case VK_END:      *sc = 0x4F; *e0 = TRUE; return;
+    case VK_DOWN:     *sc = 0x50; *e0 = TRUE; return;
+    case VK_NEXT:     *sc = 0x51; *e0 = TRUE; return;
+    case VK_INSERT:   *sc = 0x52; *e0 = TRUE; return;
+    case VK_DELETE:   *sc = 0x53; *e0 = TRUE; return;
+    case VK_LWIN:     *sc = 0x5B; *e0 = TRUE; return;
+    case VK_RWIN:     *sc = 0x5C; *e0 = TRUE; return;
+    case VK_DIVIDE:   *sc = 0x35; *e0 = TRUE; return;
+    case VK_LCONTROL: *sc = 0x1D; return;
+    case VK_LMENU:    *sc = 0x38; return;
+    case VK_LSHIFT:   *sc = 0x2A; return;
+    case VK_RSHIFT:   *sc = 0x36; return;
+    case VK_NUMPAD7:  *sc = 0x47; return;
+    case VK_NUMPAD8:  *sc = 0x48; return;
+    case VK_NUMPAD9:  *sc = 0x49; return;
+    case VK_NUMPAD4:  *sc = 0x4B; return;
+    case VK_NUMPAD5:  *sc = 0x4C; return;
+    case VK_NUMPAD6:  *sc = 0x4D; return;
+    case VK_NUMPAD1:  *sc = 0x4F; return;
+    case VK_NUMPAD2:  *sc = 0x50; return;
+    case VK_NUMPAD3:  *sc = 0x51; return;
+    case VK_NUMPAD0:  *sc = 0x52; return;
+    case VK_DECIMAL:  *sc = 0x53; return;
+    default: {
+        UINT msc = MapVirtualKeyW(vk, 0);
+        *sc = (unsigned short)(msc & 0xFF);
+        return;
+    }
+    }
+}
+
+int kid_to_vk(int kid) {
     switch (kid) {
     case MID_LBUTTON:  return VK_LBUTTON;
     case MID_RBUTTON:  return VK_RBUTTON;
@@ -622,6 +773,7 @@ static int kid_to_vk(int kid) {
         case 0x48: return VK_NUMPAD8;
         case 0x49: return VK_NUMPAD9;
         case 0x4B: return VK_NUMPAD4;
+        case 0x4C: return VK_NUMPAD5;
         case 0x4D: return VK_NUMPAD6;
         case 0x4F: return VK_NUMPAD1;
         case 0x50: return VK_NUMPAD2;
@@ -633,7 +785,7 @@ static int kid_to_vk(int kid) {
     return (int)MapVirtualKeyW(sc, MAPVK_VSC_TO_VK);
 }
 
-static void get_vk_name(int vk, WCHAR *buf, int buflen) {
+void get_vk_name(int vk, WCHAR *buf, int buflen) {
     switch (vk) {
     case VK_LBUTTON:  lstrcpynW(buf, L"M.Left", buflen); return;
     case VK_RBUTTON:  lstrcpynW(buf, L"M.Right", buflen); return;
@@ -785,6 +937,23 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
         if (dev == 0) continue;
         InterceptionStroke stroke;
         if (interception_receive(g_ctx, dev, &stroke, 1) <= 0) continue;
+        if (interception_is_keyboard(dev) && g_swap_enabled && (g_active || g_swap_no_start)) {
+            InterceptionKeyStroke *ksw = (InterceptionKeyStroke *)&stroke;
+            int skid = KID(ksw->code, ksw->state);
+            if (skid >= 0 && skid < 0x200) {
+                int svk = kid_to_vk(skid);
+                if (svk > 0 && svk < 256 && g_key_swap[svk]) {
+                    int nvk = g_key_swap[svk];
+                    unsigned short nsc; BOOL ne0;
+                    vk_to_sc_e0(nvk, &nsc, &ne0);
+                    ksw->code = nsc;
+                    if (ne0)
+                        ksw->state |= INTERCEPTION_KEY_E0;
+                    else
+                        ksw->state &= ~INTERCEPTION_KEY_E0;
+                }
+            }
+        }
         if (interception_is_keyboard(dev)) {
             InterceptionKeyStroke *ks = (InterceptionKeyStroke *)&stroke;
             int kid = KID(ks->code, ks->state);
@@ -810,6 +979,14 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                     g_hflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP;
                     if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) active_add(kid);
                 }
+                if (g_macro_recording) {
+                    MacroEvent me;
+                    me.type = (ks->state & INTERCEPTION_KEY_UP) ? MACRO_EVT_KEY_UP : MACRO_EVT_KEY_DOWN;
+                    me.vk = vk; me.scan = ks->code; me.flags = ks->state; me.mouse_state = 0;
+                    me.mouse_x = 0; me.mouse_y = 0;
+                    QueryPerformanceCounter(&me.timestamp);
+                    macro_push_event(&me);
+                }
             }
         } else if (interception_is_mouse(dev)) {
             InterceptionMouseStroke *ms = (InterceptionMouseStroke *)&stroke;
@@ -833,6 +1010,30 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                     if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)
                         active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up);
                 }
+            }
+            for (int b2 = 0; b2 < (int)N_MOUSE_BTNS; b2++) {
+                if (!(ms->state & g_mouse_btns[b2].dn)) continue;
+                int mvk = g_mouse_btns[b2].vk;
+                if (!macro_is_mouse_vk(mvk)) continue;
+                HWND mhwnd = macro_get_hwnd();
+                if (mhwnd)
+                    PostMessageW(mhwnd, WM_MACRO_MOUSE_HK, (WPARAM)mvk, 0);
+                else if (g_macro_active && (g_active || g_macro_no_start)) {
+                    if (mvk == g_macro_hk_stop_vk)
+                        PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + MAX_MACRO_SLOTS, 0);
+                    for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++)
+                        if (g_macro_slots[mi2].hk_play_vk == mvk && g_macro_slots[mi2].enabled)
+                            PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + mi2, 0);
+                }
+            }
+            if (g_macro_recording && ms->state) {
+                MacroEvent me;
+                me.type = MACRO_EVT_MOUSE_BTN;
+                me.vk = 0; me.scan = 0; me.flags = 0; me.mouse_state = ms->state;
+                POINT mpt; GetCursorPos(&mpt);
+                me.mouse_x = mpt.x; me.mouse_y = mpt.y;
+                QueryPerformanceCounter(&me.timestamp);
+                macro_push_event(&me);
             }
         }
         interception_send(g_ctx, dev, &stroke, 1);
@@ -899,6 +1100,15 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
         LeaveCriticalSection(&g_cs_active);
         if (cnt == 0) { Sleep(1); continue; }
         mode = g_mode; delay = g_delay;
+        BOOL pause_toggled = FALSE;
+        if (mode == MODE_HYBRID && g_pause_toggle_on_hold) {
+            for (i = 0; i < cnt; i++) {
+                if (local_held[i] && !local_toggled[i]) {
+                    int vk2 = local_slots[i].vk;
+                    if (!is_skippable(vk2) && !is_excluded(vk2)) { pause_toggled = TRUE; break; }
+                }
+            }
+        }
         for (i = 0; i < cnt && g_active; i++) {
             int vk = local_slots[i].vk;
             BOOL is_toggled_on = local_toggled[i];
@@ -909,6 +1119,7 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             else if (mode==MODE_HOLD) is_on = is_held_on;
             else is_on = is_toggled_on;
             if (!is_on) continue;
+            if (pause_toggled && is_toggled_on && !is_held_on) continue;
             if ((mode==MODE_HOLD || (mode==MODE_HYBRID && !is_toggled_on)) && (is_skippable(vk)||is_excluded(vk))) continue;
             if (mode==MODE_HYBRID) idev = is_toggled_on ? local_tdev[i] : local_hdev[i];
             else if (mode==MODE_HOLD) idev = local_hdev[i];
@@ -943,6 +1154,28 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
 /*                      TOGGLE / GAME MODE                             */
 /* ================================================================== */
 
+static void play_toggle_sound(BOOL on) {
+    if (!g_sound_enabled) return;
+    WCHAR path[MAX_PATH];
+    get_exe_dir(path, MAX_PATH);
+    if (on)
+        lstrcatW(path, L"\x6309\x952E\x5F00\x542F.mp3");
+    else
+        lstrcatW(path, L"\x6309\x952E\x5173\x95ED.mp3");
+    WCHAR cmd[MAX_PATH + 64];
+    wsprintfW(cmd, L"open \"%s\" type mpegvideo alias togglesnd", path);
+    mciSendStringW(L"close togglesnd", NULL, 0, NULL);
+    mciSendStringW(cmd, NULL, 0, NULL);
+    mciSendStringW(L"play togglesnd from 0", NULL, 0, NULL);
+}
+
+static void update_sound_btn(void) {
+    if (!g_btn_sound) return;
+    static const WCHAR icon_on[]  = {0xD83D, 0xDD0A, 0};
+    static const WCHAR icon_off[] = {0xD83D, 0xDD07, 0};
+    SetWindowTextW(g_btn_sound, g_sound_enabled ? icon_on : icon_off);
+}
+
 static DWORD g_last_toggle_tick = 0;
 
 static void toggle_active(void) {
@@ -960,10 +1193,12 @@ static void toggle_active(void) {
             send_toggled_keyups();
         else
             release_toggled();
+        play_toggle_sound(FALSE);
     } else {
         if (!g_key_lock) release_toggled();
         g_active = TRUE;
         g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
+        play_toggle_sound(TRUE);
     }
     InvalidateRect(g_hwnd, NULL, TRUE);
 }
@@ -989,9 +1224,9 @@ static void toggle_game_mode(HWND hwnd) {
         g_game_x=gr.left; g_game_y=gr.top; g_game_w=gr.right-gr.left; g_game_h=gr.bottom-gr.top;
         save_config();
         SetWindowLongW(hwnd, GWL_STYLE, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, WS_EX_TOPMOST);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, 0);
         int w=g_normal_rect.right-g_normal_rect.left, h=g_normal_rect.bottom-g_normal_rect.top;
-        SetWindowPos(hwnd, HWND_TOPMOST, g_normal_rect.left, g_normal_rect.top, w, h, SWP_FRAMECHANGED);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, g_normal_rect.left, g_normal_rect.top, w, h, SWP_FRAMECHANGED);
         EnumChildWindows(hwnd, show_child_proc, SW_SHOW);
     }
     InvalidateRect(hwnd, NULL, TRUE);
@@ -1040,29 +1275,33 @@ static void update_hotkey_labels(void) {
     SetWindowTextW(g_lbl_gmhkname, name);
 }
 
+static void set_label_if_changed(HWND lbl, const WCHAR *text) {
+    WCHAR old[256];
+    GetWindowTextW(lbl, old, 256);
+    if (lstrcmpW(old, text) != 0)
+        SetWindowTextW(lbl, text);
+}
+
 static void update_ui_labels(void) {
     WCHAR t[256];
-    SetWindowTextW(g_lbl_driver, g_drv_ok
+    set_label_if_changed(g_lbl_driver, g_drv_ok
         ? L"\x2714  Interception \x9A71\x52A8\x5C31\x7EEA"
         : L"\x2716  Interception \x9A71\x52A8\x672A\x5C31\x7EEA");
 
-    if (g_active) {
-        SetWindowTextW(g_lbl_status, L"\x72B6\x6001:  \x2705 \x5DF2\x5F00\x542F");
-        SetWindowTextW(g_btn_startstop, L"\x5173\x95ED\x8FDE\x53D1");
-    } else {
-        SetWindowTextW(g_lbl_status, L"\x72B6\x6001:  \x5DF2\x5173\x95ED");
-        SetWindowTextW(g_btn_startstop, L"\x5F00\x542F\x8FDE\x53D1");
-    }
+    if (g_active)
+        set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x2705 \x5DF2\x5F00\x542F");
+    else
+        set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x5DF2\x5173\x95ED");
 
     LONG pps = g_pps;
     if (g_active && pps > 0) wsprintfW(t, L"\x901F\x5EA6:  %ld \x6B21/\x79D2", pps);
     else lstrcpyW(t, L"\x901F\x5EA6:  --");
-    SetWindowTextW(g_lbl_speed, t);
+    set_label_if_changed(g_lbl_speed, t);
 
     if (g_delay >= 10000) wsprintfW(t, L"%dms", g_delay/1000);
     else if (g_delay < 1000) wsprintfW(t, L"%d\x03BCs", g_delay);
     else { int mw=g_delay/1000, mf=(g_delay%1000)/100; wsprintfW(t, L"%d\x03BCs (%d.%dms)", g_delay, mw, mf); }
-    SetWindowTextW(g_lbl_delay, t);
+    set_label_if_changed(g_lbl_delay, t);
 
     WCHAR keys[256]={0}; int count;
     if (g_active) {
@@ -1075,7 +1314,7 @@ static void update_ui_labels(void) {
         if (count>0) wsprintfW(t, L"\x8FDE\x53D1\x4E2D:  %s", keys);
         else lstrcpyW(t, L"\x8FDE\x53D1\x4E2D:  --");
     } else lstrcpyW(t, L"\x8FDE\x53D1\x4E2D:  --");
-    SetWindowTextW(g_lbl_repeat, t);
+    set_label_if_changed(g_lbl_repeat, t);
 }
 
 /* ================================================================== */
@@ -1132,9 +1371,24 @@ static void paint_keyboard(HDC hdc) {
     for (int i = 0; i < (int)N_KEYS; i++) {
         KeyRect *kr = &g_krects[i];
         int vk = kr->vk;
+        const WCHAR *draw_label = kr->label;
         HBRUSH fill_br; COLORREF text;
 
-        if (is_skippable(vk)) {
+        if (g_swap_enabled && vk > 0 && vk < 256 && g_key_swap[vk]) {
+            int swap_vk = g_key_swap[vk];
+            vk = swap_vk;
+            for (int j = 0; j < (int)N_KEYS; j++) {
+                if (g_krects[j].vk == swap_vk) { draw_label = g_krects[j].label; break; }
+            }
+        }
+
+        if (g_drag_active && i == g_drag_src_idx) {
+            fill_br = g_br_drag_src; text = RGB(255,255,255);
+        } else if (g_drag_active && i == g_drag_dst_idx) {
+            fill_br = g_br_drag_dst; text = RGB(255,255,255);
+        } else if (g_macro_active && macro_is_bound_vk(vk)) {
+            fill_br = g_br_macro; text = RGB(255,255,255);
+        } else if (is_skippable(vk)) {
             fill_br = g_br_skip; text = RGB(180,180,180);
         } else if (g_mode == MODE_HOLD) {
             if (vk > 0 && vk < 256 && g_exclude[vk]) { fill_br = g_br_excl; text = RGB(255,255,255); }
@@ -1156,7 +1410,7 @@ static void paint_keyboard(HDC hdc) {
         SelectObject(hdc, old_br);
 
         SetTextColor(hdc, text);
-        DrawTextW(hdc, kr->label, -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        DrawTextW(hdc, draw_label, -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }
 
     SelectObject(hdc, old_pen);
@@ -1198,6 +1452,12 @@ static void paint_keyboard_legend(HDC hdc, int y) {
     x += 85; sq.left=x; sq.right=x+12;
     FillRect(hdc, &sq, g_br_skip);
     TextOutW(hdc, x+16, y-1, L"\x70ED\x952E", 2);
+
+    if (g_macro_active) {
+        x += 70; sq.left=x; sq.right=x+12;
+        FillRect(hdc, &sq, g_br_macro);
+        TextOutW(hdc, x+16, y-1, L"\x5B8F", 1);
+    }
 
     SelectObject(hdc, old);
 }
@@ -1279,8 +1539,17 @@ static void create_controls(HWND hwnd) {
     HWND lbl;
     int y = KB_Y + 26*KU/4 + 35;
 
-    g_lbl_driver = make_label(hwnd, IDC_LABEL_DRIVER, L"", LP_X, y, LP_W, 20, 0);
+    g_lbl_driver = make_label(hwnd, IDC_LABEL_DRIVER, L"", LP_X, y, 260, 20, 0);
     SendMessageW(g_lbl_driver, WM_SETFONT, (WPARAM)hf, TRUE);
+    g_chk_swap = CreateWindowW(L"BUTTON", L"\x952E\x4F4D\x5BF9\x8C03",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+270, y, 90, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP, NULL, NULL);
+    SendMessageW(g_chk_swap, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_swap_enabled) SendMessageW(g_chk_swap, BM_SETCHECK, BST_CHECKED, 0);
+    g_chk_swap_nostart = CreateWindowW(L"BUTTON", L"\x4E0D\x5F00\x542F\x8FDE\x53D1\x952E\x4F4D\x8C03\x4E5F\x751F\x6548",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+365, y, 185, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP_NOSTART, NULL, NULL);
+    SendMessageW(g_chk_swap_nostart, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_swap_no_start) SendMessageW(g_chk_swap_nostart, BM_SETCHECK, BST_CHECKED, 0);
+    EnableWindow(g_chk_swap_nostart, g_swap_enabled);
     y += 24;
     make_label(hwnd, 0, NULL, LP_X, y, LP_W, 2, SS_ETCHEDHORZ);
     y += 8;
@@ -1289,6 +1558,7 @@ static void create_controls(HWND hwnd) {
     SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
     lbl = make_label(hwnd, 0, L"\x6309\x952E\x95F4\x9694:", 510, y, 80, 18, 0);
     SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+    int y_label = y;
     y += 22;
 
     g_radio_hold = CreateWindowW(L"BUTTON", L"\x6309\x4F4F\x8FDE\x53D1 (Hold)",
@@ -1298,8 +1568,13 @@ static void create_controls(HWND hwnd) {
         WS_CHILD|WS_VISIBLE|BS_AUTORADIOBUTTON, LP_X+158, y, 155, 20, hwnd, (HMENU)IDC_RADIO_TOGGLE, NULL, NULL);
     SendMessageW(g_radio_toggle, WM_SETFONT, (WPARAM)hf, TRUE);
     g_radio_hybrid = CreateWindowW(L"BUTTON", L"\x6DF7\x5408\x6A21\x5F0F (Hybrid)",
-        WS_CHILD|WS_VISIBLE|BS_AUTORADIOBUTTON, LP_X+318, y, 160, 20, hwnd, (HMENU)IDC_RADIO_HYBRID, NULL, NULL);
+        WS_CHILD|WS_VISIBLE|BS_AUTORADIOBUTTON, LP_X+318, y_label, 170, 20, hwnd, (HMENU)IDC_RADIO_HYBRID, NULL, NULL);
     SendMessageW(g_radio_hybrid, WM_SETFONT, (WPARAM)hf, TRUE);
+    g_chk_pause_hold = CreateWindowW(L"BUTTON", L"\x6309\x538B\x65F6\x6682\x505C\x8FDE\x53D1",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX|WS_GROUP, LP_X+318, y, 170, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_PAUSE_HOLD, NULL, NULL);
+    SendMessageW(g_chk_pause_hold, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_pause_toggle_on_hold) SendMessageW(g_chk_pause_hold, BM_SETCHECK, BST_CHECKED, 0);
+    EnableWindow(g_chk_pause_hold, g_mode == MODE_HYBRID);
     {
         HWND sel = (g_mode==MODE_HOLD) ? g_radio_hold : (g_mode==MODE_CUSTOM) ? g_radio_toggle : g_radio_hybrid;
         SendMessageW(sel, BM_SETCHECK, BST_CHECKED, 0);
@@ -1325,11 +1600,24 @@ static void create_controls(HWND hwnd) {
         WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+115, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_TURBO, NULL, NULL);
     SendMessageW(g_chk_turbo, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_turbo) SendMessageW(g_chk_turbo, BM_SETCHECK, BST_CHECKED, 0);
+    g_chk_macro_active = CreateWindowW(L"BUTTON", L"\x5B8F\x751F\x6548",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+225, y, 80, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_MACRO_ACTIVE, NULL, NULL);
+    SendMessageW(g_chk_macro_active, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_macro_active) SendMessageW(g_chk_macro_active, BM_SETCHECK, BST_CHECKED, 0);
+    g_chk_macro_nostart = CreateWindowW(L"BUTTON", L"\x4E0D\x5F00\x542F\x8FDE\x53D1\x5B8F\x4E5F\x751F\x6548",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+310, y, 160, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_MACRO_NOSTART, NULL, NULL);
+    SendMessageW(g_chk_macro_nostart, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_macro_no_start) SendMessageW(g_chk_macro_nostart, BM_SETCHECK, BST_CHECKED, 0);
+    EnableWindow(g_chk_macro_nostart, g_macro_active);
     y += 24;
 
-    g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 190, 18, 0);
+    g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 105, 18, 0);
     SendMessageW(g_lbl_status, WM_SETFONT, (WPARAM)hf, TRUE);
-    g_lbl_repeat = make_label(hwnd, IDC_LABEL_REPEAT, L"", LP_X+195, y, 290, 18, 0);
+    g_btn_sound = CreateWindowW(L"BUTTON", L"",
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, LP_X+106, y-2, 28, 22, hwnd, (HMENU)(INT_PTR)IDC_BTN_SOUND, NULL, NULL);
+    SendMessageW(g_btn_sound, WM_SETFONT, (WPARAM)hf, TRUE);
+    update_sound_btn();
+    g_lbl_repeat = make_label(hwnd, IDC_LABEL_REPEAT, L"", LP_X+170, y, 310, 18, 0);
     SendMessageW(g_lbl_repeat, WM_SETFONT, (WPARAM)hf, TRUE);
     g_lbl_speed = make_label(hwnd, IDC_LABEL_SPEED, L"", LP_X+490, y, 230, 18, 0);
     SendMessageW(g_lbl_speed, WM_SETFONT, (WPARAM)hf, TRUE);
@@ -1337,25 +1625,23 @@ static void create_controls(HWND hwnd) {
     make_label(hwnd, 0, NULL, LP_X, y, LP_W, 2, SS_ETCHEDHORZ);
     y += 8;
 
-    g_btn_startstop = make_button(hwnd, IDC_BTN_STARTSTOP, L"\x5F00\x542F\x8FDE\x53D1", LP_X, y, 140, 28);
-    SendMessageW(g_btn_startstop, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND bgm = make_button(hwnd, IDC_BTN_GAMEMODE, L"\x6E38\x620F\x6A21\x5F0F", LP_X+150, y, 110, 28);
-    SendMessageW(bgm, WM_SETFONT, (WPARAM)hf, TRUE);
-    lbl = make_label(hwnd, 0, L"\x542F\x52A8:", LP_X+280, y+5, 40, 18, 0);
+    lbl = make_label(hwnd, 0, L"\x542F\x505C:", LP_X+5, y+5, 40, 18, 0);
     SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
-    g_lbl_hkname = make_label(hwnd, IDC_LABEL_HKNAME, L"", LP_X+322, y+4, 75, 20, SS_CENTER|WS_BORDER);
+    g_lbl_hkname = make_label(hwnd, IDC_LABEL_HKNAME, L"", LP_X+47, y+4, 75, 20, SS_CENTER|WS_BORDER);
     SendMessageW(g_lbl_hkname, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND bsh = make_button(hwnd, IDC_BTN_SETHK, L"\x6539", LP_X+400, y+2, 30, 24);
+    HWND bsh = make_button(hwnd, IDC_BTN_SETHK, L"\x6539", LP_X+125, y+2, 30, 24);
     SendMessageW(bsh, WM_SETFONT, (WPARAM)hf, TRUE);
-    lbl = make_label(hwnd, 0, L"\x6E38\x620F:", LP_X+450, y+5, 40, 18, 0);
+    lbl = make_label(hwnd, 0, L"\x6E38\x620F:", LP_X+175, y+5, 40, 18, 0);
     SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
-    g_lbl_gmhkname = make_label(hwnd, IDC_LABEL_GMHKNAME, L"", LP_X+492, y+4, 75, 20, SS_CENTER|WS_BORDER);
+    g_lbl_gmhkname = make_label(hwnd, IDC_LABEL_GMHKNAME, L"", LP_X+217, y+4, 75, 20, SS_CENTER|WS_BORDER);
     SendMessageW(g_lbl_gmhkname, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND bsg = make_button(hwnd, IDC_BTN_SETGMHK, L"\x6539", LP_X+570, y+2, 30, 24);
+    HWND bsg = make_button(hwnd, IDC_BTN_SETGMHK, L"\x6539", LP_X+295, y+2, 30, 24);
     SendMessageW(bsg, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND buninst = make_button(hwnd, IDC_BTN_UNINSTALL, L"\x5378\x8F7D\x9A71\x52A8", LP_X+610, y, 80, 28);
+    HWND bmacro = make_button(hwnd, IDC_BTN_MACRO, L"\x5B8F\x5F55\x5236", LP_X+555, y, 70, 28);
+    SendMessageW(bmacro, WM_SETFONT, (WPARAM)hf, TRUE);
+    HWND buninst = make_button(hwnd, IDC_BTN_UNINSTALL, L"\x5378\x8F7D", LP_X+635, y, 50, 28);
     SendMessageW(buninst, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND babout = make_button(hwnd, IDC_BTN_ABOUT, L"\x5173\x4E8E", LP_X+695, y, 50, 28);
+    HWND babout = make_button(hwnd, IDC_BTN_ABOUT, L"?", LP_X+695, y, 25, 28);
     SendMessageW(babout, WM_SETFONT, (WPARAM)hf, TRUE);
 
     update_hotkey_labels();
@@ -1491,6 +1777,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
         RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
         RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk);
+        if (g_macro_active) macro_register_play_hotkeys(hwnd);
         SetTimer(hwnd, IDT_UI, UI_TIMER_MS, NULL);
         create_controls(hwnd);
         return 0;
@@ -1498,7 +1785,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == IDT_UI) {
             update_ui_labels();
-            if (g_active) InvalidateRect(hwnd, NULL, FALSE);
+            if (g_active) {
+                RECT kbr = { KB_X - 5, KB_Y - 8, KB_X + 96*KU/4 + 5, KB_Y + 26*KU/4 + 35 };
+                InvalidateRect(hwnd, &kbr, FALSE);
+            }
+        } else if (wp == IDT_MACRO_PRESS_POLL) {
+            macro_check_press_release();
         } else if (wp == IDT_REPEAT) {
             if (g_repeat_btn && (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
                 do_delay_adjust(g_repeat_btn);
@@ -1517,26 +1809,29 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_HOTKEY:
         if (wp == ID_HK_TOGGLE) toggle_active();
         else if (wp == ID_HK_GAME) toggle_game_mode(hwnd);
+        else if (g_macro_active && (g_active || g_macro_no_start) && wp == ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
+            macro_handle_play_hotkey(-1);
+        else if (g_macro_active && (g_active || g_macro_no_start) && wp >= ID_HK_MACRO_BASE && wp < ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
+            macro_handle_play_hotkey((int)(wp - ID_HK_MACRO_BASE));
         return 0;
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDC_RADIO_HOLD:
             release_toggled(); g_mode = MODE_HOLD; save_config();
+            EnableWindow(g_chk_pause_hold, FALSE);
             InvalidateRect(hwnd, NULL, TRUE); break;
         case IDC_RADIO_TOGGLE:
             release_toggled(); g_mode = MODE_CUSTOM; save_config();
+            EnableWindow(g_chk_pause_hold, FALSE);
             InvalidateRect(hwnd, NULL, TRUE); break;
         case IDC_RADIO_HYBRID:
             release_toggled(); g_mode = MODE_HYBRID; save_config();
+            EnableWindow(g_chk_pause_hold, TRUE);
             InvalidateRect(hwnd, NULL, TRUE); break;
         case IDC_BTN_DEC:
         case IDC_BTN_INC:
             break;
-        case IDC_BTN_STARTSTOP:
-            toggle_active(); break;
-        case IDC_BTN_GAMEMODE:
-            toggle_game_mode(hwnd); break;
         case IDC_BTN_EXIT:
             DestroyWindow(hwnd); break;
         case IDC_BTN_SETHK:
@@ -1578,6 +1873,103 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             save_config();
             break;
         }
+        case IDC_CHK_PAUSE_HOLD: {
+            BOOL want = (SendMessageW(g_chk_pause_hold, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want) {
+                int r = MessageBoxW(hwnd,
+                    L"\x5F00\x542F\x300C\x6309\x538B\x65F6\x6682\x505C\x8FDE\x53D1\x300D\x540E\xFF1A\n\n"
+                    L"\x5982\x679C\x67D0\x4E2A\x952E\x5DF2\x901A\x8FC7\x6307\x5B9A\x8FDE\x53D1\x88AB\x6FC0\x6D3B\xFF0C"
+                    L"\x6B64\x65F6\x6309\x4F4F\x53E6\x4E00\x4E2A\x952E\xFF08\x6309\x538B\x6A21\x5F0F\xFF09\xFF0C"
+                    L"\x5219\x6682\x65F6\x505C\x6B62\x6307\x5B9A\x8FDE\x53D1\xFF0C"
+                    L"\x4F18\x5148\x6267\x884C\x6309\x538B\x6A21\x5F0F\x7684\x8FDE\x53D1\x3002\n\n"
+                    L"\x5F53\x6240\x6709\x6309\x538B\x7684\x952E\x5F39\x8D77\x540E\xFF0C"
+                    L"\x81EA\x52A8\x6062\x590D\x6307\x5B9A\x8FDE\x53D1\x3002\n\n"
+                    L"\x786E\x8BA4\x5F00\x542F\x5417\xFF1F",
+                    L"\x6309\x538B\x65F6\x6682\x505C\x8FDE\x53D1", MB_YESNO | MB_ICONQUESTION);
+                if (r == IDYES) { g_pause_toggle_on_hold = TRUE; }
+                else { g_pause_toggle_on_hold = FALSE; SendMessageW(g_chk_pause_hold, BM_SETCHECK, BST_UNCHECKED, 0); }
+            } else {
+                g_pause_toggle_on_hold = FALSE;
+            }
+            save_config();
+            break;
+        }
+        case IDC_CHK_MACRO_ACTIVE: {
+            BOOL want = (SendMessageW(g_chk_macro_active, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want) {
+                int r = MessageBoxW(hwnd,
+                    L"\x5F00\x542F\x300C\x5B8F\x751F\x6548\x300D\x540E\xFF1A\n\n"
+                    L"\x5B8F\x5F55\x5236\x4E2D\x8BBE\x7F6E\x7684\x5B8F\x5FEB\x6377\x952E\x5C06\x5728\x4E3B\x754C\x9762\x751F\x6548\xFF0C\n"
+                    L"\x6309\x4E0B\x5BF9\x5E94\x5FEB\x6377\x952E\x53EF\x89E6\x53D1\x5B8F\x811A\x672C\x56DE\x653E\x3002\n\n"
+                    L"\x5DF2\x7ED1\x5B9A\x5B8F\x5FEB\x6377\x952E\x7684\x6309\x952E\x4F1A\x5728\x865A\x62DF\x952E\x76D8\x4E0A\n"
+                    L"\x4EE5\x84DD\x8272\x6807\x8BC6\xFF0C\x4E14\x4E0D\x518D\x53C2\x4E0E\x8FDE\x53D1\x3002\n\n"
+                    L"\x786E\x8BA4\x5F00\x542F\x5417\xFF1F",
+                    L"\x5B8F\x751F\x6548", MB_YESNO | MB_ICONQUESTION);
+                if (r == IDYES) {
+                    g_macro_active = TRUE;
+                    macro_register_play_hotkeys(hwnd);
+                } else {
+                    g_macro_active = FALSE;
+                    SendMessageW(g_chk_macro_active, BM_SETCHECK, BST_UNCHECKED, 0);
+                }
+            } else {
+                g_macro_active = FALSE;
+                macro_unregister_play_hotkeys(hwnd);
+            }
+            EnableWindow(g_chk_macro_nostart, g_macro_active);
+            if (!g_macro_active) {
+                g_macro_no_start = FALSE;
+                SendMessageW(g_chk_macro_nostart, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            save_config();
+            InvalidateRect(hwnd, NULL, TRUE);
+            break;
+        }
+        case IDC_CHK_MACRO_NOSTART: {
+            g_macro_no_start = (SendMessageW(g_chk_macro_nostart, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            save_config();
+            break;
+        }
+        case IDC_CHK_SWAP: {
+            g_swap_enabled = (SendMessageW(g_chk_swap, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            EnableWindow(g_chk_swap_nostart, g_swap_enabled);
+            if (!g_swap_enabled) {
+                g_swap_no_start = FALSE;
+                SendMessageW(g_chk_swap_nostart, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            save_config();
+            InvalidateRect(hwnd, NULL, TRUE);
+            if (g_swap_enabled) {
+                MessageBoxW(hwnd,
+                    L"\x952E\x4F4D\x5BF9\x8C03\x529F\x80FD\x5DF2\x5F00\x542F\xFF01\n\n"
+                    L"\x64CD\x4F5C\x65B9\x6CD5\xFF1A\n"
+                    L"\x5728\x4E0A\x65B9\x6A21\x62DF\x952E\x76D8\x4E2D\xFF0C\x6309\x4F4F\x9F20\x6807\x5DE6\x952E\x62D6\x52A8\x4E00\x4E2A\x6309\x952E\x5230\x53E6\x4E00\x4E2A\x6309\x952E\x7684\x4F4D\x7F6E\xFF0C\n"
+                    L"\x5373\x53EF\x5B8C\x6210\x4E24\x4E2A\x952E\x7684\x5BF9\x8C03\x3002\n\n"
+                    L"\x5BF9\x8C03\x540E\xFF0C\x6309\x7269\x7406\x952E A \x5C06\x89E6\x53D1\x952E B \x7684\x529F\x80FD\xFF0C\x53CD\x4E4B\x4EA6\x7136\x3002\n"
+                    L"\x518D\x6B21\x5C06\x5DF2\x5BF9\x8C03\x7684\x4E24\x4E2A\x952E\x4E92\x76F8\x62D6\x52A8\xFF0C\x53EF\x53D6\x6D88\x5BF9\x8C03\x3002",
+                    L"\x952E\x4F4D\x5BF9\x8C03", MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        }
+        case IDC_CHK_SWAP_NOSTART: {
+            g_swap_no_start = (SendMessageW(g_chk_swap_nostart, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            save_config();
+            break;
+        }
+        case IDC_BTN_SOUND:
+            g_sound_enabled = !g_sound_enabled;
+            update_sound_btn();
+            save_config();
+            break;
+        case IDC_BTN_MACRO:
+            if (g_active) toggle_active();
+            release_toggled();
+            UnregisterHotKey(hwnd, ID_HK_TOGGLE);
+            UnregisterHotKey(hwnd, ID_HK_GAME);
+            macro_unregister_play_hotkeys(hwnd);
+            ShowWindow(hwnd, SW_HIDE);
+            macro_show_window(hwnd);
+            break;
         case IDC_BTN_UNINSTALL:
             try_uninstall();
             break;
@@ -1614,21 +2006,59 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (!g_game_mode) {
             int idx = keyboard_hittest(mx, my);
             if (idx >= 0) {
-                int vk = g_krects[idx].vk;
-                if (!is_skippable(vk) && vk > 0 && vk < 256) {
-                    if (g_mode == MODE_HOLD) {
-                        g_exclude[vk] = !g_exclude[vk];
-                    } else if (g_mode == MODE_CUSTOM) {
-                        g_custom_keys[vk] = !g_custom_keys[vk];
-                    } else {
-                        if (g_custom_keys[vk])          { g_custom_keys[vk]=FALSE; g_exclude[vk]=TRUE; }
-                        else if (!g_exclude[vk])         { g_custom_keys[vk]=TRUE; }
-                        else                             { g_exclude[vk]=FALSE; }
+                if (g_swap_enabled) {
+                    g_drag_src_idx = idx;
+                    g_drag_dst_idx = idx;
+                    g_drag_active = TRUE;
+                    SetCapture(hwnd);
+                } else {
+                    int vk = g_krects[idx].vk;
+                    if (!is_skippable(vk) && vk > 0 && vk < 256) {
+                        if (g_mode == MODE_HOLD) {
+                            g_exclude[vk] = !g_exclude[vk];
+                        } else if (g_mode == MODE_CUSTOM) {
+                            g_custom_keys[vk] = !g_custom_keys[vk];
+                        } else {
+                            if (g_custom_keys[vk])          { g_custom_keys[vk]=FALSE; g_exclude[vk]=TRUE; }
+                            else if (!g_exclude[vk])         { g_custom_keys[vk]=TRUE; }
+                            else                             { g_exclude[vk]=FALSE; }
+                        }
+                        save_config();
+                        InvalidateRect(hwnd, NULL, TRUE);
                     }
-                    save_config();
-                    InvalidateRect(hwnd, NULL, TRUE);
                 }
             }
+        }
+        return 0;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (g_drag_active) {
+            int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+            int idx = keyboard_hittest(mx, my);
+            if (idx != g_drag_dst_idx) {
+                g_drag_dst_idx = idx;
+                RECT kbr = { KB_X - 5, KB_Y - 8, KB_X + 96*KU/4 + 5, KB_Y + 26*KU/4 + 35 };
+                InvalidateRect(hwnd, &kbr, FALSE);
+            }
+        }
+        return 0;
+    }
+
+    case WM_LBUTTONUP: {
+        if (g_drag_active) {
+            ReleaseCapture();
+            g_drag_active = FALSE;
+            int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+            int dst = keyboard_hittest(mx, my);
+            if (dst >= 0 && dst != g_drag_src_idx) {
+                int vk_a = g_krects[g_drag_src_idx].vk;
+                int vk_b = g_krects[dst].vk;
+                perform_key_swap(vk_a, vk_b);
+            }
+            g_drag_src_idx = -1;
+            g_drag_dst_idx = -1;
+            InvalidateRect(hwnd, NULL, TRUE);
         }
         return 0;
     }
@@ -1656,10 +2086,25 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DestroyWindow(hwnd);
         return 0;
 
+    case WM_MACRO_CLOSED:
+        ShowWindow(hwnd, SW_SHOW);
+        SetForegroundWindow(hwnd);
+        RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
+        RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk);
+        if (g_macro_active) macro_register_play_hotkeys(hwnd);
+        if (g_chk_macro_active) SendMessageW(g_chk_macro_active, BM_SETCHECK, g_macro_active ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (g_chk_macro_nostart) {
+            SendMessageW(g_chk_macro_nostart, BM_SETCHECK, g_macro_no_start ? BST_CHECKED : BST_UNCHECKED, 0);
+            EnableWindow(g_chk_macro_nostart, g_macro_active);
+        }
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI);
         UnregisterHotKey(hwnd, ID_HK_TOGGLE);
         UnregisterHotKey(hwnd, ID_HK_GAME);
+        macro_unregister_play_hotkeys(hwnd);
         PostQuitMessage(0);
         return 0;
     }
@@ -1703,6 +2148,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     QueryPerformanceFrequency(&g_qpc_freq);
     init_exclude_defaults();
     init_custom_keys_defaults();
+    macro_init_defaults();
     load_config();
     init_interception();
     init_keyrects();
@@ -1722,16 +2168,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int cw = KB_X + 96*KU/4 + 10;
     int ch = 434;
     RECT wr = {0, 0, cw, ch};
-    AdjustWindowRectEx(&wr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, FALSE, WS_EX_TOPMOST);
+    AdjustWindowRectEx(&wr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, FALSE, 0);
     int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
     /* UTF-8: 丐帮高手v3 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv3.2";
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv4.0";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
-    g_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoKeyClass",
+    g_hwnd = CreateWindowExW(0, L"AutoKeyClass",
         title_w,
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         sx, sy, ww, wh, NULL, NULL, hInst, NULL);
