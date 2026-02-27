@@ -129,6 +129,8 @@ static BOOL load_interception_dll(void) {
 #define IDC_RADIO_HYBRID   118
 #define IDC_BTN_ABOUT      119
 #define IDC_CHK_KEYLOCK    121
+#define IDC_BTN_UNINSTALL  122
+#define IDC_CHK_TURBO      123
 #define IDM_GM_TOGGLE      200
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
@@ -155,9 +157,8 @@ static InterceptionContext g_ctx      = NULL;
 static BOOL                g_drv_ok   = FALSE;
 static volatile BOOL       g_active   = FALSE;
 static volatile BOOL       g_quit     = FALSE;
-static volatile int        g_delay    = 5000;
-static volatile int        g_burst    = 1;
-static volatile int        g_mode     = MODE_HYBRID;
+static volatile int        g_delay    = 1000;
+static volatile int        g_mode     = MODE_HOLD;
 static HANDLE              g_ithread  = NULL;
 static HANDLE              g_rthread  = NULL;
 static HWND                g_hwnd     = NULL;
@@ -180,12 +181,13 @@ static int   g_hk_toggle_vk = VK_F1;
 static int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
 
-static BOOL  g_key_lock     = FALSE;
+static BOOL  g_key_lock     = TRUE;
+static BOOL  g_turbo        = TRUE;
 
 static HWND g_lbl_driver, g_lbl_status, g_lbl_delay, g_lbl_speed;
-static HWND g_lbl_repeat, g_lbl_burst, g_lbl_hkname, g_lbl_gmhkname;
+static HWND g_lbl_repeat, g_lbl_hkname, g_lbl_gmhkname;
 static HWND g_btn_startstop, g_radio_hold, g_radio_toggle, g_radio_hybrid;
-static HWND g_chk_keylock;
+static HWND g_chk_keylock, g_chk_turbo;
 
 static int     g_repeat_btn   = 0;
 static int     g_repeat_count = 0;
@@ -202,6 +204,12 @@ static HBRUSH g_br_custom    = NULL;
 static HBRUSH g_br_unsel     = NULL;
 static HBRUSH g_br_skip      = NULL;
 static HBRUSH g_br_kbbg      = NULL;
+
+static HDC     g_paint_memdc  = NULL;
+static HBITMAP g_paint_bitmap = NULL;
+static HBITMAP g_paint_oldbm  = NULL;
+static int     g_paint_w      = 0;
+static int     g_paint_h      = 0;
 
 static void init_gdi_cache(void) {
     g_font_kb     = CreateFontW(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
@@ -222,6 +230,11 @@ static void cleanup_gdi_cache(void) {
                        g_br_excl, g_br_hold, g_br_custom, g_br_unsel, g_br_skip, g_br_kbbg };
     for (int i = 0; i < (int)(sizeof(objs)/sizeof(objs[0])); i++)
         if (objs[i]) DeleteObject(objs[i]);
+    if (g_paint_memdc) {
+        if (g_paint_oldbm) SelectObject(g_paint_memdc, g_paint_oldbm);
+        DeleteDC(g_paint_memdc);
+    }
+    if (g_paint_bitmap) DeleteObject(g_paint_bitmap);
 }
 
 static int kid_to_vk(int kid);
@@ -236,8 +249,9 @@ typedef struct {
 static volatile ActiveSlot g_aslots[MAX_ACTIVE];
 static volatile int        g_active_count = 0;
 static volatile LONG       g_pps = 0;
+static LARGE_INTEGER       g_qpc_freq;
 
-static void active_add(int kid) {
+static void active_add_ex(int kid, BOOL is_mouse, unsigned short mouse_dn, unsigned short mouse_up) {
     EnterCriticalSection(&g_cs_active);
     for (int i = 0; i < g_active_count; i++)
         if (g_aslots[i].kid == kid) { LeaveCriticalSection(&g_cs_active); return; }
@@ -245,26 +259,26 @@ static void active_add(int kid) {
     int vk = kid_to_vk(kid);
     if (vk <= 0) { LeaveCriticalSection(&g_cs_active); return; }
     ActiveSlot s; memset(&s, 0, sizeof(s));
-    s.kid = kid; s.vk = vk; s.is_mouse = FALSE;
-    s.scan = (unsigned short)(kid & 0xFF);
-    s.flags_dn = (kid & 0x100) ? INTERCEPTION_KEY_E0 : 0;
-    s.flags_up = s.flags_dn | INTERCEPTION_KEY_UP;
+    s.kid = kid; s.vk = vk; s.is_mouse = is_mouse;
+    if (is_mouse) {
+        s.mouse_dn = mouse_dn; s.mouse_up = mouse_up;
+    } else {
+        s.scan = (unsigned short)(kid & 0xFF);
+        s.flags_dn = (kid & 0x100) ? INTERCEPTION_KEY_E0 : 0;
+        s.flags_up = s.flags_dn | INTERCEPTION_KEY_UP;
+    }
     g_aslots[g_active_count] = s;
     g_active_count++;
     LeaveCriticalSection(&g_cs_active);
 }
 
+static void active_add(int kid) {
+    active_add_ex(kid, FALSE, 0, 0);
+}
+
 static void active_add_mouse(int mid, int vk, unsigned short dn, unsigned short up) {
-    EnterCriticalSection(&g_cs_active);
-    for (int i = 0; i < g_active_count; i++)
-        if (g_aslots[i].kid == mid) { LeaveCriticalSection(&g_cs_active); return; }
-    if (g_active_count >= MAX_ACTIVE) { LeaveCriticalSection(&g_cs_active); return; }
-    ActiveSlot s; memset(&s, 0, sizeof(s));
-    s.kid = mid; s.vk = vk; s.is_mouse = TRUE;
-    s.mouse_dn = dn; s.mouse_up = up;
-    g_aslots[g_active_count] = s;
-    g_active_count++;
-    LeaveCriticalSection(&g_cs_active);
+    (void)vk;
+    active_add_ex(mid, TRUE, dn, up);
 }
 
 static void active_remove(int kid) {
@@ -412,7 +426,7 @@ static void save_config(void) {
     lstrcatW(path, L"config.json");
     char buf[8192]; int pos = 0; int rem = (int)sizeof(buf);
     #define SCFG(fmt, ...) do { int n = snprintf(buf+pos, rem, fmt, __VA_ARGS__); if (n>0){pos+=n; rem-=n;} } while(0)
-    SCFG("{\n  \"delay_us\": %d,\n  \"burst\": %d,\n  \"mode\": %d,\n", g_delay, g_burst, g_mode);
+    SCFG("{\n  \"delay_us\": %d,\n  \"mode\": %d,\n", g_delay, g_mode);
     SCFG("  \"exclude\": [%s", "");
     int first = 1;
     for (int i = 1; i < 256 && rem > 8; i++) { if (!g_exclude[i]) continue; if (!first) SCFG(",%s",""); SCFG("%d", i); first = 0; }
@@ -423,7 +437,7 @@ static void save_config(void) {
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
     SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
-    SCFG("  \"key_lock\": %d\n}\n", g_key_lock ? 1 : 0);
+    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d\n}\n", g_key_lock ? 1 : 0, g_turbo ? 1 : 0);
     #undef SCFG
     HANDLE hFile = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
@@ -444,15 +458,13 @@ static void load_config(void) {
     WCHAR path[MAX_PATH]; get_exe_dir(path, MAX_PATH); lstrcatW(path, L"config.json");
     HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (hFile == INVALID_HANDLE_VALUE) { save_config(); return; }
-    char buf[4096]; DWORD bytesRead;
+    char buf[8192]; DWORD bytesRead;
     ReadFile(hFile, buf, sizeof(buf)-1, &bytesRead, NULL); CloseHandle(hFile);
     buf[bytesRead] = 0;
     char *p;
     p = strstr(buf, "\"delay_us\"");
     if (p) { p = strchr(p, ':'); if (p) g_delay = atoi(p+1); }
     else { p = strstr(buf, "\"delay\""); if (p) { p = strchr(p, ':'); if (p) g_delay = atoi(p+1)*1000; } }
-    p = strstr(buf, "\"burst\"");
-    if (p) { p = strchr(p, ':'); if (p) { g_burst = atoi(p+1); if (g_burst<1) g_burst=1; if (g_burst>1000) g_burst=1000; } }
     p = strstr(buf, "\"mode\"");
     if (p) { p = strchr(p, ':'); if (p) g_mode = atoi(p+1); }
     p = strstr(buf, "\"exclude\"");
@@ -466,6 +478,7 @@ static void load_config(void) {
     p = strstr(buf, "\"hk_toggle\""); if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_toggle_vk=v; } }
     p = strstr(buf, "\"hk_game\"");   if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_game_vk=v; } }
     p = strstr(buf, "\"key_lock\""); if (p) { p = strchr(p, ':'); if (p) g_key_lock = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"turbo\"");    if (p) { p = strchr(p, ':'); if (p) g_turbo = (atoi(p+1) != 0); }
 }
 
 /* ================================================================== */
@@ -501,7 +514,52 @@ static int do_install(void) {
     FreeConsole(); return 0;
 }
 
+static int do_uninstall(void) {
+    AllocConsole();
+    SetConsoleTitleW(L"\x5378\x8F7D Interception \x9A71\x52A8");
+    HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
+    con_print(hCon, L"=== \x5378\x8F7D Interception \x9A71\x52A8 ===\n\n");
+    WCHAR tempDir[MAX_PATH], installerPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    wsprintfW(installerPath, L"%sinstall-interception.exe", tempDir);
+    con_print(hCon, L"[1/2] \x6B63\x5728\x91CA\x653E\x5378\x8F7D\x7A0B\x5E8F...\n");
+    if (!extract_resource(IDR_INSTALL_EXE, installerPath)) {
+        con_print(hCon, L"  [\x5931\x8D25]\n\n\x6309\x56DE\x8F66\x952E\x9000\x51FA...\n");
+        WCHAR c; DWORD r; ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), &c, 1, &r, NULL); return 1;
+    }
+    con_print(hCon, L"  [\x6210\x529F]\n\n[2/2] \x6B63\x5728\x5378\x8F7D\x9A71\x52A8...\n");
+    WCHAR cmdline[MAX_PATH+32]; wsprintfW(cmdline, L"\"%s\" /uninstall", installerPath);
+    STARTUPINFOW si={0}; si.cb=sizeof(si); PROCESS_INFORMATION pi={0};
+    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, tempDir, &si, &pi)) {
+        con_print(hCon, L"  [\x5931\x8D25]\n"); DeleteFileW(installerPath);
+        WCHAR c; DWORD r; ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), &c, 1, &r, NULL); return 1;
+    }
+    WaitForSingleObject(pi.hProcess, 30000); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    DeleteFileW(installerPath);
+    con_print(hCon, L"  [\x6210\x529F]\n\n\x5378\x8F7D\x5B8C\x6210\xFF01\x8BF7\x91CD\x542F\x7535\x8111\x3002\n\n\x6309\x56DE\x8F66\x952E\x5173\x95ED...\n");
+    WCHAR c; DWORD rd; ReadConsoleW(GetStdHandle(STD_INPUT_HANDLE), &c, 1, &rd, NULL);
+    FreeConsole(); return 0;
+}
+
 static void init_interception(void);
+
+static void try_uninstall(void) {
+    int r = MessageBoxW(g_hwnd,
+        L"\x786E\x5B9A\x8981\x5378\x8F7D Interception \x9A71\x52A8\x5417\xFF1F\n\n"
+        L"\x5378\x8F7D\x540E\x9700\x91CD\x542F\x7535\x8111\xFF0C\x8FDE\x53D1\x529F\x80FD\x5C06\x4E0D\x53EF\x7528\x3002",
+        L"\x5378\x8F7D\x9A71\x52A8", MB_YESNO | MB_ICONWARNING);
+    if (r != IDYES) return;
+    if (g_active) { g_active = FALSE; if (g_rthread) { WaitForSingleObject(g_rthread,500); CloseHandle(g_rthread); g_rthread=NULL; } }
+    WCHAR exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);
+    SHELLEXECUTEINFOW sei; memset(&sei, 0, sizeof(sei));
+    sei.cbSize=sizeof(sei); sei.fMask=SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb=L"runas"; sei.lpFile=exe; sei.lpParameters=L"/uninstall"; sei.nShow=SW_SHOW;
+    if (!ShellExecuteExW(&sei)) { MessageBoxW(g_hwnd, L"\x65E0\x6CD5\x83B7\x53D6\x7BA1\x7406\x5458\x6743\x9650", L"\x9519\x8BEF", MB_ICONERROR); return; }
+    WaitForSingleObject(sei.hProcess, 180000); CloseHandle(sei.hProcess);
+    MessageBoxW(g_hwnd, L"\x9A71\x52A8\x5378\x8F7D\x5B8C\x6210\xFF0C\x8BF7\x91CD\x542F\x7535\x8111\x3002", L"\x63D0\x793A", MB_ICONWARNING);
+    g_drv_ok = FALSE;
+    InvalidateRect(g_hwnd, NULL, TRUE);
+}
 
 static void try_auto_install(void) {
     int r = MessageBoxW(NULL,
@@ -599,7 +657,7 @@ static void init_exclude_defaults(void) {
         VK_SNAPSHOT, VK_INSERT, VK_DELETE,
         '0', '7', '8', '9',
         'A', 'B', 'D', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
-        'S', 'U', 'W', 'Y',
+        'S', 'U', 'V', 'W', 'Y',
         VK_LWIN, VK_RWIN, VK_APPS,
         VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4,
         VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9,
@@ -783,72 +841,102 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
 }
 
 static void interruptible_sleep_us(int us) {
+    LARGE_INTEGER start, now;
+    long long target, elapsed;
+    int ms_sleep;
     if (us <= 0 || !g_active) return;
-    LARGE_INTEGER freq, start, now;
-    QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&start);
-    long long target = (long long)us * freq.QuadPart / 1000000LL;
-    int ms_part = us/1000 - 1;
-    while (ms_part > 0 && g_active) {
-        int chunk = (ms_part > 2) ? 2 : ms_part; Sleep(chunk); ms_part -= chunk;
-        QueryPerformanceCounter(&now); if (now.QuadPart - start.QuadPart >= target) return;
+    QueryPerformanceCounter(&start);
+    target = (long long)us * g_qpc_freq.QuadPart / 1000000LL;
+    ms_sleep = us / 1000 - 2;
+    if (ms_sleep < 0) ms_sleep = 0;
+    while (ms_sleep > 0 && g_active) {
+        int chunk = (ms_sleep > 4) ? 4 : ms_sleep;
+        Sleep(chunk);
+        ms_sleep -= chunk;
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart - start.QuadPart >= target) return;
     }
-    do { QueryPerformanceCounter(&now); } while (now.QuadPart - start.QuadPart < target && g_active);
+    do {
+        YieldProcessor();
+        QueryPerformanceCounter(&now);
+        elapsed = now.QuadPart - start.QuadPart;
+    } while (elapsed < target && g_active);
 }
 
 static DWORD WINAPI repeat_proc(LPVOID p) {
     (void)p;
-    timeBeginPeriod(1);
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
-    InterceptionKeyStroke ibatch[2]; memset(ibatch, 0, sizeof(ibatch));
-    LARGE_INTEGER freq, last; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&last);
+    LARGE_INTEGER last;
+    InterceptionKeyStroke ibatch[2];
+    InterceptionMouseStroke mbatch[2];
     LONG local_count = 0;
     ActiveSlot local_slots[MAX_ACTIVE];
+    BOOL local_toggled[MAX_ACTIVE];
+    BOOL local_held[MAX_ACTIVE];
+    InterceptionDevice local_tdev[MAX_ACTIVE];
+    InterceptionDevice local_hdev[MAX_ACTIVE];
+
+    timeBeginPeriod(1);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    memset(ibatch, 0, sizeof(ibatch));
+    memset(mbatch, 0, sizeof(mbatch));
+    QueryPerformanceCounter(&last);
+
     while (g_active) {
-        int cnt;
+        int cnt, mode, delay, i;
+        BOOL any_sent = FALSE;
         EnterCriticalSection(&g_cs_active);
         cnt = g_active_count;
-        if (cnt > 0) memcpy(local_slots, (void*)g_aslots, cnt * sizeof(ActiveSlot));
+        if (cnt > 0) {
+            memcpy(local_slots, (void*)g_aslots, cnt * sizeof(ActiveSlot));
+            for (i = 0; i < cnt; i++) {
+                int kid = local_slots[i].kid;
+                local_toggled[i] = g_toggled[kid];
+                local_held[i] = g_held[kid];
+                local_tdev[i] = g_tdev[kid];
+                local_hdev[i] = g_hdev[kid];
+            }
+        }
         LeaveCriticalSection(&g_cs_active);
         if (cnt == 0) { Sleep(1); continue; }
-        int mode=g_mode, delay=g_delay; BOOL any_sent=FALSE;
-        for (int i=0; i<cnt && g_active; i++) {
-            int kid=local_slots[i].kid, vk=local_slots[i].vk;
-            BOOL is_toggled_on = g_toggled[kid];
-            BOOL is_held_on = g_held[kid];
+        mode = g_mode; delay = g_delay;
+        for (i = 0; i < cnt && g_active; i++) {
+            int kid = local_slots[i].kid, vk = local_slots[i].vk;
+            BOOL is_toggled_on = local_toggled[i];
+            BOOL is_held_on = local_held[i];
             BOOL is_on;
+            InterceptionDevice idev;
             if (mode==MODE_HYBRID) is_on = is_toggled_on || (is_held_on && !is_toggled_on);
             else if (mode==MODE_HOLD) is_on = is_held_on;
             else is_on = is_toggled_on;
             if (!is_on) continue;
             if ((mode==MODE_HOLD || (mode==MODE_HYBRID && !is_toggled_on)) && (is_skippable(vk)||is_excluded(vk))) continue;
-            any_sent = TRUE;
-            InterceptionDevice idev;
-            if (mode==MODE_HYBRID) idev = is_toggled_on ? g_tdev[kid] : g_hdev[kid];
-            else if (mode==MODE_HOLD) idev = g_hdev[kid];
-            else idev = g_tdev[kid];
+            if (mode==MODE_HYBRID) idev = is_toggled_on ? local_tdev[i] : local_hdev[i];
+            else if (mode==MODE_HOLD) idev = local_hdev[i];
+            else idev = local_tdev[i];
             if (!idev) continue;
-            int burst = (delay<=100) ? g_burst : 1;
+            any_sent = TRUE;
             if (local_slots[i].is_mouse) {
-                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
-                for (int b=0; b<burst; b++) {
-                    ms.state = local_slots[i].mouse_dn;
-                    interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
-                    ms.state = local_slots[i].mouse_up;
-                    interception_send(g_ctx, idev, (InterceptionStroke*)&ms, 1);
-                    local_count++;
-                }
+                mbatch[0].state = local_slots[i].mouse_dn;
+                mbatch[1].state = local_slots[i].mouse_up;
+                interception_send(g_ctx, idev, (InterceptionStroke*)mbatch, 2);
             } else {
-                ibatch[0].code=local_slots[i].scan; ibatch[0].state=local_slots[i].flags_dn;
-                ibatch[1].code=local_slots[i].scan; ibatch[1].state=local_slots[i].flags_up;
-                for (int b=0; b<burst; b++) { interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2); local_count++; }
+                ibatch[0].code = local_slots[i].scan; ibatch[0].state = local_slots[i].flags_dn;
+                ibatch[1].code = local_slots[i].scan; ibatch[1].state = local_slots[i].flags_up;
+                interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2);
+            }
+            local_count++;
+        }
+        {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart - last.QuadPart >= g_qpc_freq.QuadPart) {
+                InterlockedExchange(&g_pps, local_count); local_count = 0; last = now;
             }
         }
-        LARGE_INTEGER now; QueryPerformanceCounter(&now);
-        if (now.QuadPart - last.QuadPart >= freq.QuadPart) { g_pps=local_count; local_count=0; last=now; }
         if (!any_sent) { Sleep(1); continue; }
-        interruptible_sleep_us(delay<100?100:delay);
+        interruptible_sleep_us(g_turbo ? (delay<1?1:delay) : (delay<1000?1000:delay));
     }
-    g_pps=0; timeEndPeriod(1); return 0;
+    InterlockedExchange(&g_pps, 0); timeEndPeriod(1); return 0;
 }
 
 /* ================================================================== */
@@ -971,13 +1059,10 @@ static void update_ui_labels(void) {
     else lstrcpyW(t, L"\x901F\x5EA6:  --");
     SetWindowTextW(g_lbl_speed, t);
 
-    if (g_burst > 1 && g_delay <= 100) wsprintfW(t, L"100\x03BCs x%d", g_burst);
-    else if (g_delay >= 10000) wsprintfW(t, L"%dms", g_delay/1000);
+    if (g_delay >= 10000) wsprintfW(t, L"%dms", g_delay/1000);
+    else if (g_delay < 1000) wsprintfW(t, L"%d\x03BCs", g_delay);
     else { int mw=g_delay/1000, mf=(g_delay%1000)/100; wsprintfW(t, L"%d\x03BCs (%d.%dms)", g_delay, mw, mf); }
     SetWindowTextW(g_lbl_delay, t);
-
-    if (g_burst > 1 && g_delay <= 100) { wsprintfW(t, L"Burst: %dx", g_burst); ShowWindow(g_lbl_burst, SW_SHOW); SetWindowTextW(g_lbl_burst, t); }
-    else ShowWindow(g_lbl_burst, SW_HIDE);
 
     WCHAR keys[256]={0}; int count;
     if (g_active) {
@@ -998,14 +1083,18 @@ static void update_ui_labels(void) {
 /* ================================================================== */
 
 static void do_delay_adjust(int btn_id) {
+    int min_delay = g_turbo ? 1 : 1000;
     if (btn_id == IDC_BTN_DEC) {
-        if (g_delay > 10000) { g_delay -= 1000; g_burst = 1; }
-        else if (g_delay > 100) { g_delay -= 100; g_burst = 1; }
-        else { g_delay = 100; if (g_burst < 1000) g_burst++; }
+        if (g_delay > 10000) g_delay -= 1000;
+        else if (g_delay > 100) g_delay -= 100;
+        else if (g_turbo && g_delay > 10) g_delay -= 10;
+        else if (g_turbo && g_delay > 1) g_delay -= 1;
+        if (g_delay < min_delay) g_delay = min_delay;
     } else {
-        if (g_burst > 1) g_burst--;
-        else if (g_delay < 10000) { g_burst = 1; g_delay += 100; }
-        else if (g_delay < 1000000) { g_burst = 1; g_delay += 1000; }
+        if (g_turbo && g_delay < 10) g_delay += 1;
+        else if (g_turbo && g_delay < 100) g_delay += 10;
+        else if (g_delay < 10000) g_delay += 100;
+        else if (g_delay < 1000000) g_delay += 1000;
     }
     save_config();
     update_ui_labels();
@@ -1036,7 +1125,8 @@ static LRESULT CALLBACK btn_repeat_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 /* ================================================================== */
 
 static void paint_keyboard(HDC hdc) {
-    HFONT old = (HFONT)SelectObject(hdc, g_font_kb);
+    HFONT old_font = (HFONT)SelectObject(hdc, g_font_kb);
+    HPEN old_pen = (HPEN)SelectObject(hdc, g_pen_border);
     SetBkMode(hdc, TRANSPARENT);
 
     for (int i = 0; i < (int)N_KEYS; i++) {
@@ -1061,19 +1151,16 @@ static void paint_keyboard(HDC hdc) {
         }
 
         RECT r = kr->rc;
-        FillRect(hdc, &r, fill_br);
-
-        HPEN op = (HPEN)SelectObject(hdc, g_pen_border);
-        MoveToEx(hdc, r.left, r.top, NULL); LineTo(hdc, r.right-1, r.top);
-        LineTo(hdc, r.right-1, r.bottom-1); LineTo(hdc, r.left, r.bottom-1);
-        LineTo(hdc, r.left, r.top);
-        SelectObject(hdc, op);
+        HBRUSH old_br = (HBRUSH)SelectObject(hdc, fill_br);
+        Rectangle(hdc, r.left, r.top, r.right, r.bottom);
+        SelectObject(hdc, old_br);
 
         SetTextColor(hdc, text);
         DrawTextW(hdc, kr->label, -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
     }
 
-    SelectObject(hdc, old);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_font);
 }
 
 static void paint_keyboard_legend(HDC hdc, int y) {
@@ -1121,9 +1208,19 @@ static void paint(HWND hwnd) {
     RECT rc; GetClientRect(hwnd, &rc);
     int w = rc.right - rc.left, h = rc.bottom - rc.top;
 
-    HDC hdc = CreateCompatibleDC(hdcScreen);
-    HBITMAP hbm = CreateCompatibleBitmap(hdcScreen, w, h);
-    HBITMAP obm = (HBITMAP)SelectObject(hdc, hbm);
+    if (w != g_paint_w || h != g_paint_h || !g_paint_memdc) {
+        if (g_paint_memdc) {
+            if (g_paint_oldbm) SelectObject(g_paint_memdc, g_paint_oldbm);
+            DeleteDC(g_paint_memdc);
+        }
+        if (g_paint_bitmap) DeleteObject(g_paint_bitmap);
+        g_paint_memdc = CreateCompatibleDC(hdcScreen);
+        g_paint_bitmap = CreateCompatibleBitmap(hdcScreen, w, h);
+        g_paint_oldbm = (HBITMAP)SelectObject(g_paint_memdc, g_paint_bitmap);
+        g_paint_w = w;
+        g_paint_h = h;
+    }
+    HDC hdc = g_paint_memdc;
 
     if (g_game_mode) {
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
@@ -1159,9 +1256,6 @@ static void paint(HWND hwnd) {
     }
 
     BitBlt(hdcScreen, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
-    SelectObject(hdc, obm);
-    DeleteObject(hbm);
-    DeleteDC(hdc);
     EndPaint(hwnd, &ps);
 }
 
@@ -1220,16 +1314,17 @@ static void create_controls(HWND hwnd) {
     g_orig_btn_proc = (WNDPROC)SetWindowLongPtrW(bdec, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     SetWindowLongPtrW(binc, GWLP_WNDPROC, (LONG_PTR)btn_repeat_proc);
     y += 26;
-    g_lbl_burst = make_label(hwnd, IDC_LABEL_BURST, L"", 510, y, 190, 18, 0);
-    SendMessageW(g_lbl_burst, WM_SETFONT, (WPARAM)hf, TRUE);
-    y += 6;
     make_label(hwnd, 0, NULL, LP_X, y, LP_W, 2, SS_ETCHEDHORZ);
     y += 8;
 
-    g_chk_keylock = CreateWindowW(L"BUTTON", L"\x6309\x952E\x9501\x5B9A",
+    g_chk_keylock = CreateWindowW(L"BUTTON", L"\x6682\x505C\x6A21\x5F0F",
         WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+5, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_KEYLOCK, NULL, NULL);
     SendMessageW(g_chk_keylock, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_key_lock) SendMessageW(g_chk_keylock, BM_SETCHECK, BST_CHECKED, 0);
+    g_chk_turbo = CreateWindowW(L"BUTTON", L"\x6781\x901F\x6A21\x5F0F",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+115, y, 100, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_TURBO, NULL, NULL);
+    SendMessageW(g_chk_turbo, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_turbo) SendMessageW(g_chk_turbo, BM_SETCHECK, BST_CHECKED, 0);
     y += 24;
 
     g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 190, 18, 0);
@@ -1258,7 +1353,9 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_lbl_gmhkname, WM_SETFONT, (WPARAM)hf, TRUE);
     HWND bsg = make_button(hwnd, IDC_BTN_SETGMHK, L"\x6539", LP_X+570, y+2, 30, 24);
     SendMessageW(bsg, WM_SETFONT, (WPARAM)hf, TRUE);
-    HWND babout = make_button(hwnd, IDC_BTN_ABOUT, L"\x5173\x4E8E", LP_X+670, y, 60, 28);
+    HWND buninst = make_button(hwnd, IDC_BTN_UNINSTALL, L"\x5378\x8F7D\x9A71\x52A8", LP_X+610, y, 80, 28);
+    SendMessageW(buninst, WM_SETFONT, (WPARAM)hf, TRUE);
+    HWND babout = make_button(hwnd, IDC_BTN_ABOUT, L"\x5173\x4E8E", LP_X+695, y, 50, 28);
     SendMessageW(babout, WM_SETFONT, (WPARAM)hf, TRUE);
 
     update_hotkey_labels();
@@ -1272,6 +1369,113 @@ static int keyboard_hittest(int mx, int my) {
             return i;
     }
     return -1;
+}
+
+/* ================================================================== */
+/*                         ABOUT DIALOG                               */
+/* ================================================================== */
+
+#define ABOUT_CW  390
+#define ABOUT_CH  180
+
+static HWND g_about_hwnd = NULL;
+
+static LRESULT CALLBACK about_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL)
+            { DestroyWindow(hwnd); return 0; }
+        break;
+    case WM_NOTIFY: {
+        NMHDR *nm = (NMHDR *)lp;
+        if (nm->code == NM_CLICK || nm->code == NM_RETURN) {
+            NMLINK *nml = (NMLINK *)lp;
+            ShellExecuteW(NULL, L"open", nml->item.szUrl, NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_about_hwnd = NULL;
+        EnableWindow(g_hwnd, TRUE);
+        SetForegroundWindow(g_hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void show_about_dialog(HWND hwndParent) {
+    WNDCLASSW wc;
+    RECT rc;
+    int wx, wy;
+    HWND lbl, link1, lbl2, link2, btn;
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+
+    if (g_about_hwnd) { SetForegroundWindow(g_about_hwnd); return; }
+
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = about_wndproc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"AboutWndClass";
+    RegisterClassW(&wc);
+
+    rc.left = 0; rc.top = 0; rc.right = ABOUT_CW; rc.bottom = ABOUT_CH;
+    AdjustWindowRectEx(&rc, style, FALSE, 0);
+    wx = rc.right - rc.left;
+    wy = rc.bottom - rc.top;
+
+    {
+        RECT pr;
+        int px, py;
+        GetWindowRect(hwndParent, &pr);
+        px = pr.left + ((pr.right - pr.left) - wx) / 2;
+        py = pr.top + ((pr.bottom - pr.top) - wy) / 2;
+        g_about_hwnd = CreateWindowExW(0, L"AboutWndClass",
+            L"\x5173\x4E8E", style,
+            px, py, wx, wy,
+            hwndParent, NULL, GetModuleHandleW(NULL), NULL);
+    }
+    if (!g_about_hwnd) return;
+
+    HFONT hf = g_font_ui;
+
+    lbl = CreateWindowW(L"STATIC",
+        L"by\x8106\x76AE\x5377\xFF0C\x5F00\x6E90\x5730\x5740:",
+        WS_CHILD | WS_VISIBLE, 20, 15, 350, 20, g_about_hwnd, NULL, NULL, NULL);
+    SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+
+    link1 = CreateWindowW(L"SysLink",
+        L"<a href=\"https://github.com/mh58373397-byte/jx3anjian\">"
+        L"https://github.com/mh58373397-byte/jx3anjian</a>",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        20, 38, 350, 20, g_about_hwnd, (HMENU)501, NULL, NULL);
+    SendMessageW(link1, WM_SETFONT, (WPARAM)hf, TRUE);
+
+    lbl2 = CreateWindowW(L"STATIC",
+        L"jx3box\x5730\x5740:",
+        WS_CHILD | WS_VISIBLE, 20, 72, 350, 20, g_about_hwnd, NULL, NULL, NULL);
+    SendMessageW(lbl2, WM_SETFONT, (WPARAM)hf, TRUE);
+
+    link2 = CreateWindowW(L"SysLink",
+        L"<a href=\"https://www.jx3box.com/tool/106371\">"
+        L"https://www.jx3box.com/tool/106371</a>",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        20, 95, 350, 20, g_about_hwnd, (HMENU)502, NULL, NULL);
+    SendMessageW(link2, WM_SETFONT, (WPARAM)hf, TRUE);
+
+    btn = CreateWindowW(L"BUTTON", L"\x786E\x5B9A",
+        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP,
+        155, 135, 80, 30, g_about_hwnd, (HMENU)IDOK, NULL, NULL);
+    SendMessageW(btn, WM_SETFONT, (WPARAM)hf, TRUE);
+
+    EnableWindow(hwndParent, FALSE);
+    ShowWindow(g_about_hwnd, SW_SHOW);
+    UpdateWindow(g_about_hwnd);
 }
 
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1339,20 +1543,47 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_setting_hk = 1; update_hotkey_labels(); break;
         case IDC_BTN_SETGMHK:
             g_setting_hk = 2; update_hotkey_labels(); break;
-        case IDC_CHK_KEYLOCK:
-            g_key_lock = (SendMessageW(g_chk_keylock, BM_GETCHECK, 0, 0) == BST_CHECKED);
-            if (!g_key_lock && !g_active) release_toggled();
+        case IDC_CHK_KEYLOCK: {
+            BOOL want = (SendMessageW(g_chk_keylock, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want) {
+                int r = MessageBoxW(hwnd,
+                    L"\x5F00\x542F\x6682\x505C\x6A21\x5F0F\x540E\xFF0C\x542F\x52A8/\x505C\x6B62"
+                    L"\x7684\x903B\x8F91\x4F1A\x53D8\x6210\x542F\x52A8/\x6682\x505C\xFF0C"
+                    L"\x53EF\x4EE5\x7528\x4E8E\x8BB0\x5FC6\x6307\x5B9A\x8FDE\x53D1\x7684\x6309\x952E\x3002\n\n"
+                    L"\x786E\x8BA4\x5F00\x542F\x5417\xFF1F",
+                    L"\x6682\x505C\x6A21\x5F0F", MB_YESNO | MB_ICONQUESTION);
+                if (r == IDYES) { g_key_lock = TRUE; }
+                else { g_key_lock = FALSE; SendMessageW(g_chk_keylock, BM_SETCHECK, BST_UNCHECKED, 0); }
+            } else {
+                g_key_lock = FALSE;
+                if (!g_active) release_toggled();
+            }
             save_config();
             break;
-        case IDC_BTN_ABOUT: {
-            static const char msg_utf8[] = "by\xE8\x84\x86\xE7\x9A\xAE\xE5\x8D\xB7\xEF\xBC\x8C\xE5\xBC\x80\xE6\xBA\x90\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://github.com/mh58373397-byte/jx3anjian\n\njx3box\xE5\x9C\xB0\xE5\x9D\x80:\nhttps://www.jx3box.com/tool/106371";
-            static const char cap_utf8[] = "\xE5\x85\xB3\xE4\xBA\x8E";
-            WCHAR msg_w[256], cap_w[32];
-            MultiByteToWideChar(CP_UTF8, 0, msg_utf8, -1, msg_w, 256);
-            MultiByteToWideChar(CP_UTF8, 0, cap_utf8, -1, cap_w, 32);
-            MessageBoxW(hwnd, msg_w, cap_w, MB_OK | MB_ICONINFORMATION);
+        }
+        case IDC_CHK_TURBO: {
+            BOOL want = (SendMessageW(g_chk_turbo, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want) {
+                int r = MessageBoxW(hwnd,
+                    L"\x6781\x901F\x6A21\x5F0F\x5141\x8BB8\x6309\x952E\x95F4\x9694\x4F4E\x4E8E" L"1ms\xFF0C"
+                    L"\x4F46\x8FC7\x4F4E\x7684\x95F4\x9694\x53EF\x80FD\x5BFC\x81F4\x7535\x8111\x6B7B\x673A\x3002\n\n"
+                    L"\x786E\x5B9A\x8981\x5F00\x542F\x5417\xFF1F",
+                    L"\x6781\x901F\x6A21\x5F0F", MB_YESNO | MB_ICONWARNING);
+                if (r == IDYES) { g_turbo = TRUE; }
+                else { g_turbo = FALSE; SendMessageW(g_chk_turbo, BM_SETCHECK, BST_UNCHECKED, 0); }
+            } else {
+                g_turbo = FALSE;
+                if (g_delay < 1000) { g_delay = 1000; update_ui_labels(); }
+            }
+            save_config();
             break;
         }
+        case IDC_BTN_UNINSTALL:
+            try_uninstall();
+            break;
+        case IDC_BTN_ABOUT:
+            show_about_dialog(hwnd);
+            break;
         }
         return 0;
 
@@ -1458,8 +1689,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     LPWSTR p = cmd;
     while (*p == L' ' || *p == L'\t') p++;
     if (wcsncmp(p, L"/install", 8) == 0) return do_install();
+    if (wcsncmp(p, L"/uninstall", 10) == 0) return do_uninstall();
 
-    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_LINK_CLASS };
     InitCommonControlsEx(&icex);
 
     if (!load_interception_dll()) {
@@ -1468,6 +1700,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     }
 
     InitializeCriticalSection(&g_cs_active);
+    QueryPerformanceFrequency(&g_qpc_freq);
     init_exclude_defaults();
     init_custom_keys_defaults();
     load_config();
@@ -1495,7 +1728,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
     /* UTF-8: 丐帮高手v3 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv3.1";
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv3.2";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"AutoKeyClass",
