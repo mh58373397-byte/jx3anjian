@@ -181,8 +181,8 @@ static int   g_hk_toggle_vk = VK_F1;
 static int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
 
-static BOOL  g_key_lock     = TRUE;
-static BOOL  g_turbo        = TRUE;
+static BOOL  g_key_lock     = FALSE;
+static BOOL  g_turbo        = FALSE;
 
 static HWND g_lbl_driver, g_lbl_status, g_lbl_delay, g_lbl_speed;
 static HWND g_lbl_repeat, g_lbl_hkname, g_lbl_gmhkname;
