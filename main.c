@@ -900,7 +900,7 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
         if (cnt == 0) { Sleep(1); continue; }
         mode = g_mode; delay = g_delay;
         for (i = 0; i < cnt && g_active; i++) {
-            int kid = local_slots[i].kid, vk = local_slots[i].vk;
+            int vk = local_slots[i].vk;
             BOOL is_toggled_on = local_toggled[i];
             BOOL is_held_on = local_held[i];
             BOOL is_on;
