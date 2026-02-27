@@ -3,216 +3,291 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>丐帮高手 v3.2 - 驱动级键盘/鼠标连发工具</title>
+<title>丐帮高手 v4.0 - 使用说明</title>
 <style>
-  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 900px; margin: 0 auto; padding: 20px 40px; color: #24292e; background: #fff; }
-  h1 { border-bottom: 1px solid #eaecef; padding-bottom: 10px; }
-  h2 { border-bottom: 1px solid #eaecef; padding-bottom: 6px; margin-top: 32px; }
-  h3 { margin-top: 24px; }
-  hr { border: none; border-top: 1px solid #eaecef; margin: 24px 0; }
-  code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 90%; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", Helvetica, Arial, sans-serif; line-height: 1.7; max-width: 920px; margin: 0 auto; padding: 20px 40px 60px; color: #24292e; background: #fff; }
+  h1 { border-bottom: 2px solid #0366d6; padding-bottom: 10px; color: #0366d6; }
+  h2 { border-bottom: 1px solid #eaecef; padding-bottom: 6px; margin-top: 36px; color: #24292e; }
+  h3 { margin-top: 24px; color: #333; }
+  hr { border: none; border-top: 1px solid #eaecef; margin: 28px 0; }
+  code { background: #f0f4f8; padding: 2px 6px; border-radius: 3px; font-size: 90%; color: #c7254e; }
   pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
-  pre code { background: none; padding: 0; }
+  pre code { background: none; padding: 0; color: inherit; }
   table { border-collapse: collapse; width: 100%; margin: 12px 0; }
   th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
-  th { background: #f6f8fa; font-weight: 600; }
-  blockquote { border-left: 4px solid #dfe2e5; margin: 12px 0; padding: 4px 16px; color: #6a737d; }
+  th { background: #f0f4f8; font-weight: 600; }
+  blockquote { border-left: 4px solid #0366d6; margin: 16px 0; padding: 8px 16px; color: #555; background: #f8f9fa; border-radius: 0 4px 4px 0; }
   a { color: #0366d6; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  ul { padding-left: 24px; }
-  ol { padding-left: 24px; }
+  ul, ol { padding-left: 24px; }
   strong { font-weight: 600; }
+  .step-box { background: #f0f7ff; border: 1px solid #c8e1ff; border-radius: 6px; padding: 16px 20px; margin: 12px 0; }
+  .warn-box { background: #fff8e1; border: 1px solid #ffe082; border-radius: 6px; padding: 12px 20px; margin: 12px 0; }
+  .tip-box { background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; padding: 12px 20px; margin: 12px 0; }
+  .color-dot { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle; margin-right: 4px; border: 1px solid #999; }
+  .dot-orange { background: rgb(220,140,20); }
+  .dot-red { background: rgb(200,60,60); }
+  .dot-green { background: rgb(50,170,50); }
+  .dot-gray { background: rgb(180,180,180); }
+  .dot-blue { background: rgb(50,120,200); }
+  .dot-swap { background: rgb(230,160,0); }
+  .dot-skip { background: rgb(100,100,100); }
+  .toc { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px 24px; margin: 20px 0; }
+  .toc ul { list-style: none; padding-left: 0; margin: 0; }
+  .toc li { padding: 3px 0; }
+  .toc a { color: #0366d6; }
 </style>
 </head>
 <body>
 
-<h1>丐帮高手 v3.2 — 驱动级键盘/鼠标连发工具</h1>
+<h1>丐帮高手 v4.0 — 使用说明</h1>
 
-<p>基于 <a href="https://github.com/oblitum/Interception">Interception</a> 驱动的高性能连发工具，在驱动层模拟键盘和鼠标输入，支持微秒级精度控制。带可视化键盘布局的图形界面，点击即可配置。</p>
+<p>驱动级键盘/鼠标连发工具，支持键位对调、宏录制回放，适用于游戏和日常使用。</p>
 
-<h2>功能特性</h2>
+<div class="toc">
+<strong>目录</strong>
 <ul>
-  <li><strong>驱动级按键模拟</strong> — 通过 Interception 驱动在内核层发送键盘/鼠标事件，非应用层模拟</li>
-  <li><strong>三种连发模式</strong> — Hold（按住连发）、Toggle（指定连发）、Hybrid（混合模式）</li>
-  <li><strong>键盘+鼠标支持</strong> — 键盘按键和鼠标五键（左/右/中/X1/X2）均可连发</li>
-  <li><strong>可视化键盘布局</strong> — 界面内嵌键盘图（含鼠标键），点击即可设置排除/连发</li>
-  <li><strong>微秒级延迟控制</strong> — 延迟范围 1μs ~ 1000ms，极速模式可突破 1ms 下限</li>
-  <li><strong>暂停模式</strong> — 停止连发时保留已指定的按键，下次启动自动恢复</li>
-  <li><strong>极速模式</strong> — 允许按键间隔低于 1ms，最低可达 1μs</li>
-  <li><strong>游戏模式</strong> — 半透明无边框悬浮窗，不遮挡游戏画面</li>
-  <li><strong>实时速度显示</strong> — 显示每秒实际按键次数（PPS）</li>
-  <li><strong>可自定义快捷键</strong> — 启动/关闭连发、游戏模式的热键均可自定义</li>
-  <li><strong>配置持久化</strong> — 所有设置自动保存/加载</li>
-  <li><strong>驱动管理</strong> — 支持一键安装和卸载驱动</li>
+  <li><a href="#install">一、安装与首次运行</a></li>
+  <li><a href="#ui">二、界面介绍</a></li>
+  <li><a href="#burst">三、连发功能</a></li>
+  <li><a href="#swap">四、键位对调</a></li>
+  <li><a href="#macro">五、宏录制与回放</a></li>
+  <li><a href="#hotkeys">六、快捷键</a></li>
+  <li><a href="#game">七、游戏模式</a></li>
+  <li><a href="#sound">八、音效提示</a></li>
+  <li><a href="#tips">九、常见问题</a></li>
 </ul>
+</div>
 
 <hr>
 
-<h2>安装与首次运行</h2>
+<h2 id="install">一、安装与首次运行</h2>
 
-<h3>1. 首次运行</h3>
+<div class="step-box">
+<strong>第一步：运行程序</strong>
+<p>双击 <code>autokey.exe</code> 启动程序。</p>
+
+<strong>第二步：安装驱动</strong>
+<p>首次运行时，程序检测到 Interception 驱动未安装，弹出提示框。点击<strong>「是」</strong>，程序会以管理员权限自动安装驱动。</p>
+
+<strong>第三步：重启电脑</strong>
+<p>安装驱动后<strong>必须重启电脑</strong>，驱动才能加载生效。</p>
+
+<strong>第四步：确认就绪</strong>
+<p>重启后再次运行 <code>autokey.exe</code>，界面上方显示 <strong>「✔ Interception 驱动就绪」</strong> 即表示一切正常，可以开始使用。</p>
+</div>
+
+<hr>
+
+<h2 id="ui">二、界面介绍</h2>
+
+<h3>整体布局（从上到下）</h3>
 <ol>
-  <li>双击运行 <code>autokey.exe</code></li>
-  <li>程序检测到 Interception 驱动未安装，弹出提示框，点击 <strong>"是"</strong></li>
-  <li>以管理员权限自动安装驱动</li>
-  <li><strong>安装完成后必须重启电脑</strong>，驱动才能加载</li>
-  <li>重启后再次运行 <code>autokey.exe</code>，界面显示 <strong>"✔ Interception 驱动就绪"</strong> 即可使用</li>
+  <li><strong>模拟键盘区</strong> — 可视化显示所有按键状态，点击或拖拽操作</li>
+  <li><strong>驱动状态行</strong> — 显示驱动是否就绪 + 「键位对调」和「不开启连发键位调也生效」复选框</li>
+  <li><strong>连发模式区</strong> — 选择 Hold / Toggle / Hybrid 模式，调节按键间隔</li>
+  <li><strong>复选框行</strong> — 暂停模式、极速模式、宏生效、不开启连发宏也生效</li>
+  <li><strong>状态栏</strong> — 显示开启/关闭状态、喇叭按钮、连发按键列表、速度</li>
+  <li><strong>底部操作栏</strong> — 启停热键、游戏热键、宏录制按钮、卸载按钮、关于按钮</li>
 </ol>
 
+<h3>模拟键盘颜色说明</h3>
+<table>
+  <thead>
+    <tr><th>颜色</th><th>含义</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><span class="color-dot dot-orange"></span> 橙色</td><td>Hold 模式可连发的键</td></tr>
+    <tr><td><span class="color-dot dot-red"></span> 红色</td><td>已排除的键（Hold/Hybrid 模式下不连发）</td></tr>
+    <tr><td><span class="color-dot dot-green"></span> 绿色</td><td>Toggle 模式已选定的键</td></tr>
+    <tr><td><span class="color-dot dot-gray"></span> 浅灰色</td><td>未选定 / 未激活的键</td></tr>
+    <tr><td><span class="color-dot dot-skip"></span> 深灰色</td><td>热键（启停/游戏），不可配置</td></tr>
+    <tr><td><span class="color-dot dot-blue"></span> 蓝色</td><td>宏绑定的快捷键</td></tr>
+    <tr><td><span class="color-dot dot-swap"></span> 橙黄色</td><td>已对调的键（键位对调启用时）</td></tr>
+  </tbody>
+</table>
+
 <hr>
 
-<h2>快捷键一览</h2>
+<h2 id="burst">三、连发功能</h2>
+
+<h3>1. 选择连发模式</h3>
+<p>在界面中部选择连发模式：</p>
 <table>
   <thead>
-    <tr><th>默认按键</th><th>功能</th><th>说明</th></tr>
+    <tr><th>模式</th><th>操作方式</th><th>适用场景</th></tr>
   </thead>
   <tbody>
-    <tr><td><strong>F1</strong></td><td>开启/关闭连发</td><td>主开关，可在界面中点击「改」自定义</td></tr>
-    <tr><td><strong>F9</strong></td><td>游戏模式</td><td>切换半透明悬浮窗，可在界面中点击「改」自定义</td></tr>
+    <tr>
+      <td><strong>Hold（按住连发）</strong></td>
+      <td>按住任意键 = 自动连发，松开 = 停止</td>
+      <td>需要按住时持续输出的场景</td>
+    </tr>
+    <tr>
+      <td><strong>Toggle（指定连发）</strong></td>
+      <td>按一下 = 开始连发，再按一下 = 停止</td>
+      <td>需要挂机自动连发的场景</td>
+    </tr>
+    <tr>
+      <td><strong>Hybrid（混合模式）</strong></td>
+      <td>绿色键可 Toggle，橙色键可 Hold</td>
+      <td>需要同时使用两种方式的场景</td>
+    </tr>
   </tbody>
 </table>
-<blockquote>快捷键可在界面中点击「启动」或「游戏」旁的「改」按钮重新设置，按 Esc 取消设置。</blockquote>
+
+<h3>2. 设置按键</h3>
+<p>确保「键位对调」复选框<strong>未勾选</strong>，然后在模拟键盘上<strong>点击按键</strong>：</p>
+<ul>
+  <li><strong>Hold 模式</strong>：点击按键在 <span class="color-dot dot-orange"></span>橙色（可连发）和 <span class="color-dot dot-red"></span>红色（排除）之间切换</li>
+  <li><strong>Toggle 模式</strong>：点击按键在 <span class="color-dot dot-green"></span>绿色（已选）和 <span class="color-dot dot-gray"></span>灰色（未选）之间切换</li>
+  <li><strong>Hybrid 模式</strong>：点击按键循环切换：<span class="color-dot dot-green"></span>绿色 → <span class="color-dot dot-red"></span>红色 → <span class="color-dot dot-orange"></span>橙色</li>
+</ul>
+
+<h3>3. 调节速度</h3>
+<p>使用 <strong>「-」</strong> 和 <strong>「+」</strong> 按钮调节按键间隔（按住可快速调节）：</p>
+<ul>
+  <li>标准范围：1ms ~ 1000ms</li>
+  <li>勾选「极速模式」可突破 1ms 下限，最低 1μs</li>
+</ul>
+<div class="warn-box">
+  <strong>注意：</strong>极速模式下过低的间隔可能导致电脑卡死，请谨慎使用。
+</div>
+
+<h3>4. 开启连发</h3>
+<p>按下 <strong>F1</strong>（默认热键）开启连发，再按 <strong>F1</strong> 关闭。开启/关闭时会有音效提示。</p>
+<p>状态栏会实时显示：连发状态、当前连发中的按键列表、每秒按键次数（PPS）。</p>
 
 <hr>
 
-<h2>详细功能说明</h2>
+<h2 id="swap">四、键位对调</h2>
 
-<h3>三种连发模式</h3>
+<div class="step-box">
+<strong>使用步骤：</strong>
+<ol>
+  <li>勾选驱动状态行旁的 <strong>「键位对调」</strong> 复选框（勾选时会弹出操作说明）</li>
+  <li>在模拟键盘上，<strong>按住鼠标左键</strong>从一个键<strong>拖动</strong>到另一个键</li>
+  <li><strong>松开鼠标</strong>，两个键即完成对调</li>
+  <li>对调后，按物理键 A 实际触发的是键 B，反之亦然</li>
+</ol>
+</div>
+
+<p><strong>视觉效果：</strong></p>
+<ul>
+  <li>拖拽过程中，源键显示为<span style="color:rgb(100,180,255);font-weight:bold;">蓝色</span>，目标键显示为<span style="color:rgb(255,100,100);font-weight:bold;">红色</span></li>
+  <li>对调完成后，两个键都以 <span class="color-dot dot-swap"></span>橙黄色 显示，标签和功能状态（颜色）跟随对调目标</li>
+  <li>例如：F12（红色/排除）和 1（橙色/连发）对调后，键盘上 1 的位置显示「F12」且为红色，F12 的位置显示「1」且为橙色</li>
+</ul>
+
+<p><strong>取消对调：</strong>再次将已对调的两个键互相拖动即可取消。</p>
+
+<p><strong>独立生效：</strong>勾选 <strong>「不开启连发键位调也生效」</strong>，键位对调无需按 F1 开启连发即可全局工作。</p>
+
+<div class="tip-box">
+  <strong>提示：</strong>键位对调在驱动层实现，对所有应用（包括游戏）全局有效。取消勾选「键位对调」复选框可暂停对调效果，但已设置的对调关系会保留。
+</div>
+
+<hr>
+
+<h2 id="macro">五、宏录制与回放</h2>
+
+<h3>1. 打开宏设置</h3>
+<p>点击底部的 <strong>「宏录制」</strong> 按钮，打开宏设置窗口。</p>
+
+<h3>2. 选择宏槽位</h3>
+<p>从顶部下拉框选择宏槽位（最多 5 组：宏1 ~ 宏5）。点击 <strong>「改名」</strong> 可自定义名称。</p>
+
+<h3>3. 录制宏</h3>
+<div class="step-box">
+<ol>
+  <li>点击 <strong>「录制」</strong> 按钮开始录制</li>
+  <li>在键盘和鼠标上执行你想录制的操作序列</li>
+  <li>点击 <strong>「停止」</strong> 按钮结束录制</li>
+  <li>录制的脚本会自动显示在编辑框中并保存</li>
+</ol>
+</div>
+
+<h3>4. 设置快捷键</h3>
+<p>点击 <strong>「宏启停键」</strong> 按钮，为每组宏设置播放和停止的快捷键（支持键盘和鼠标按键）。</p>
+
+<h3>5. 启用宏</h3>
+<ol>
+  <li>在宏设置窗口中勾选 <strong>「生效」</strong>，启用当前宏</li>
+  <li>回到主界面，勾选 <strong>「宏生效」</strong> 全局启用宏功能</li>
+  <li>可选勾选 <strong>「不开启连发宏也生效」</strong>，让宏无需开启连发即可工作</li>
+  <li>按设置好的快捷键即可播放/停止宏</li>
+</ol>
+
+<div class="tip-box">
+  <strong>提示：</strong>宏绑定的快捷键在模拟键盘上以 <span class="color-dot dot-blue"></span>蓝色 显示，且该键不会被连发功能影响。
+</div>
+
+<hr>
+
+<h2 id="hotkeys">六、快捷键</h2>
+
 <table>
   <thead>
-    <tr><th>模式</th><th>说明</th></tr>
+    <tr><th>默认按键</th><th>功能</th><th>如何修改</th></tr>
   </thead>
   <tbody>
-    <tr><td><strong>Hold（按住连发）</strong></td><td>按住任意键 = 连发，松开 = 停止。橙色键可连发，红色键为排除</td></tr>
-    <tr><td><strong>Toggle（指定连发）</strong></td><td>按一下白名单中的键 = 开始连发，再按 = 停止。绿色键为已选</td></tr>
-    <tr><td><strong>Hybrid（混合模式）</strong></td><td>绿色键可 Toggle，橙色键可 Hold，红色键为排除。同时支持两种方式</td></tr>
+    <tr><td><strong>F1</strong></td><td>开启/关闭连发</td><td>点击底部「启停」旁的「改」按钮，按下新按键</td></tr>
+    <tr><td><strong>F9</strong></td><td>进入/退出游戏模式</td><td>点击底部「游戏」旁的「改」按钮，按下新按键</td></tr>
+    <tr><td><strong>自定义</strong></td><td>播放/停止宏</td><td>在宏设置窗口中通过「宏启停键」设置</td></tr>
   </tbody>
 </table>
+<blockquote>设置热键时按 <strong>Esc</strong> 可取消设置。启停热键和游戏模式热键在连发过程中不会被连发。</blockquote>
 
-<h3>按键设置方式</h3>
-<p>通过<strong>点击界面上的键盘图</strong>来设置：</p>
+<hr>
+
+<h2 id="game">七、游戏模式</h2>
+
+<p>按 <strong>F9</strong>（默认）进入游戏模式：</p>
 <ul>
-  <li><strong>Hold 模式</strong>：点击键盘上的键，橙色↔红色切换（连发↔不连发）</li>
-  <li><strong>Toggle 模式</strong>：点击键盘上的键，绿色↔灰色切换（已选↔未选）</li>
-  <li><strong>Hybrid 模式</strong>：点击循环切换：绿色（指定连发）→ 红色（排除）→ 橙色（按住连发）</li>
-</ul>
-<p>灰色键为热键（启动/游戏），不可配置。</p>
-
-<h3>鼠标按键</h3>
-<p>键盘图右上方显示 5 个鼠标按键（ML/MR/MM/X1/X2），设置方式与键盘相同。</p>
-
-<h3>暂停模式</h3>
-<p>勾选 <strong>「暂停模式」</strong> 后，启动/停止的逻辑变为启动/暂停：</p>
-<ul>
-  <li>停止连发时<strong>保留</strong>已指定的按键状态</li>
-  <li>下次启动时自动恢复之前的连发按键</li>
-  <li>适用于需要记忆指定连发按键的场景</li>
-</ul>
-
-<h3>极速模式</h3>
-<p>勾选 <strong>「极速模式」</strong> 后：</p>
-<ul>
-  <li>允许按键间隔低于 1ms（最低可达 1μs）</li>
-  <li><strong>警告</strong>：过低的间隔可能导致电脑卡死，请谨慎使用</li>
-</ul>
-
-<h3>延迟调节</h3>
-<p>使用界面上的 <strong>-</strong> 和 <strong>+</strong> 按钮调节按键间隔：</p>
-<table>
-  <thead>
-    <tr><th>延迟范围</th><th>步进</th><th>说明</th></tr>
-  </thead>
-  <tbody>
-    <tr><td>≥ 10ms</td><td>每次 1ms</td><td>标准模式</td></tr>
-    <tr><td>1ms ~ 9.9ms</td><td>每次 100μs</td><td>显示 μs 和 ms 双单位</td></tr>
-    <tr><td>&lt; 1ms（极速模式）</td><td>10μs / 1μs</td><td>需开启极速模式</td></tr>
-  </tbody>
-</table>
-
-<h3>游戏模式</h3>
-<p>点击 <strong>「游戏模式」</strong> 按钮或按默认热键 <strong>F9</strong>：</p>
-<ul>
-  <li>窗口变为半透明无边框悬浮窗（约 35% 不透明度）</li>
-  <li>仅显示：<strong>状态</strong> / <strong>连发中的按键</strong> / <strong>速度</strong></li>
-  <li>鼠标拖拽窗口可移动，右键弹出菜单</li>
+  <li>窗口变为<strong>半透明无边框悬浮窗</strong>，始终置顶，不遮挡游戏画面</li>
+  <li>仅显示核心信息：状态、连发中的按键、速度</li>
+  <li><strong>鼠标左键拖拽</strong>移动窗口位置</li>
+  <li><strong>鼠标右键</strong>弹出菜单（启停连发 / 显示主界面 / 退出）</li>
   <li>窗口位置和大小自动记忆</li>
 </ul>
-<p>再次点击或按热键退出游戏模式。</p>
+<p>再次按 <strong>F9</strong> 退出游戏模式，恢复正常界面。</p>
 
 <hr>
 
-<h2>配置文件</h2>
-<p>所有设置自动保存到程序同目录的 <code>config.json</code>：</p>
-<pre><code>{
-  "delay_us": 1000,
-  "mode": 0,
-  "exclude": [1, 2, 4, 5, 6, 8, 9, 13, ...],
-  "custom_keys": [],
-  "game_x": 1295, "game_y": 253, "game_w": 200, "game_h": 80,
-  "hk_toggle": 112, "hk_game": 120,
-  "key_lock": 1,
-  "turbo": 1
-}</code></pre>
+<h2 id="sound">八、音效提示</h2>
 
-<table>
-  <thead>
-    <tr><th>字段</th><th>说明</th></tr>
-  </thead>
-  <tbody>
-    <tr><td><code>delay_us</code></td><td>延迟（微秒），1000 = 1ms</td></tr>
-    <tr><td><code>mode</code></td><td>0 = Hold，1 = Toggle，2 = Hybrid</td></tr>
-    <tr><td><code>exclude</code></td><td>Hold 模式排除键的 VK 码列表</td></tr>
-    <tr><td><code>custom_keys</code></td><td>Toggle 模式白名单键的 VK 码列表</td></tr>
-    <tr><td><code>game_x/y/w/h</code></td><td>游戏模式窗口位置和大小</td></tr>
-    <tr><td><code>hk_toggle</code></td><td>启动/关闭连发热键的 VK 码（默认 112 = F1）</td></tr>
-    <tr><td><code>hk_game</code></td><td>游戏模式热键的 VK 码（默认 120 = F9）</td></tr>
-    <tr><td><code>key_lock</code></td><td>暂停模式开关（1 = 开启）</td></tr>
-    <tr><td><code>turbo</code></td><td>极速模式开关（1 = 开启）</td></tr>
-  </tbody>
-</table>
+<p>每次开启或关闭连发时，程序会播放音效提示：</p>
+<ul>
+  <li>开启连发：播放 <code>按键开启.mp3</code></li>
+  <li>关闭连发：播放 <code>按键关闭.mp3</code></li>
+</ul>
+<p>点击状态栏旁的 <strong>喇叭按钮</strong> 可随时开关音效。音效文件需放在 <code>autokey.exe</code> 同目录。</p>
 
 <hr>
 
-<h2>项目结构</h2>
-<pre><code>├── main.c                    # 主程序源码（单文件，约 1750 行）
-├── build.bat                 # 一键编译脚本
-├── interception.h            # Interception 驱动 API 头文件
-├── interception.dll          # Interception 运行库（编译时嵌入 exe）
-├── install-interception.exe  # 驱动安装程序（编译时嵌入 exe）
-├── resource.h                # 资源 ID 定义
-├── resource.rc               # 资源脚本（将 dll 和 exe 嵌入）
-├── app.manifest              # 应用程序清单
-└── autokey.exe               # 编译产物</code></pre>
-<p>编译后生成单个 <code>autokey.exe</code>，内嵌了 <code>interception.dll</code> 和 <code>install-interception.exe</code>，无需额外文件即可运行和安装驱动。</p>
+<h2 id="tips">九、常见问题</h2>
 
-<h2>技术实现</h2>
-<ul>
-  <li><strong>按键捕获：</strong> Interception 驱动拦截所有键盘和鼠标事件，记录按下/释放状态</li>
-  <li><strong>按键发送：</strong> <code>interception_send()</code> 批量发送按下+释放两个事件（1 次调用）</li>
-  <li><strong>高精度计时：</strong> <code>QueryPerformanceCounter</code> 实现微秒级延迟精度，大延迟用 <code>Sleep</code> 节省 CPU，最后一段用 QPC 自旋精确等待</li>
-  <li><strong>线程模型：</strong> 捕获线程 + 发送线程分离，发送线程设为 <code>THREAD_PRIORITY_TIME_CRITICAL</code></li>
-  <li><strong>线程安全：</strong> 活跃槽位使用临界区保护，PPS 计数使用原子操作，按键状态使用快照读取</li>
-  <li><strong>活跃按键追踪：</strong> 最多 16 个活跃槽位，预计算扫描码和 flags，热循环零系统调用开销</li>
-  <li><strong>双缓冲渲染：</strong> 缓存兼容 DC 和 bitmap，仅窗口大小变化时重建，避免每帧分配</li>
-  <li><strong>DLL 动态加载：</strong> 从资源释放 <code>interception.dll</code> 到临时目录后加载，单 exe 分发</li>
-</ul>
+<h3>Q: 界面显示「✖ Interception 驱动未就绪」怎么办？</h3>
+<p>A: 说明驱动未安装或未生效。点击底部的「卸载」按钮旁，程序会提示安装驱动。安装后<strong>必须重启电脑</strong>。</p>
 
-<h2>注意事项</h2>
-<ul>
-  <li>Interception 驱动安装需要<strong>管理员权限</strong></li>
-  <li>安装驱动后必须<strong>重启电脑</strong></li>
-  <li>可通过界面「卸载驱动」按钮卸载 Interception 驱动</li>
-  <li>部分反作弊系统可能检测 Interception 驱动，请自行评估风险</li>
-  <li>启动热键和游戏模式热键在连发中不会被触发</li>
-</ul>
+<h3>Q: 键位对调后想恢复怎么办？</h3>
+<p>A: 两种方式：① 再次将已对调的两个键互相拖动即可取消；② 取消勾选「键位对调」复选框可暂停所有对调效果（对调关系保留，重新勾选后恢复）。</p>
 
-<h2>依赖</h2>
-<ul>
-  <li><a href="https://github.com/oblitum/Interception">Interception</a> — 键盘/鼠标驱动级拦截框架</li>
-</ul>
+<h3>Q: 连发开启后按键没反应？</h3>
+<p>A: 请确认：① 驱动已就绪（显示 ✔）；② 按键未被设为排除（红色）；③ 在 Toggle/Hybrid 模式下，需要先点击键盘选择要连发的按键（绿色）。</p>
 
-<h2>License</h2>
-<p>MIT</p>
+<h3>Q: 宏录制后如何使用？</h3>
+<p>A: ① 在宏窗口勾选「生效」；② 主界面勾选「宏生效」；③ 如需不开连发就能用，勾选「不开启连发宏也生效」；④ 按设置好的快捷键播放。</p>
+
+<h3>Q: 程序能最小化到后台吗？</h3>
+<p>A: 可以。程序窗口默认不置顶，可以正常最小化或被其他窗口遮挡。热键（F1/F9 等）全局有效，即使程序在后台也能控制。进入游戏模式后窗口会置顶悬浮。</p>
+
+<h3>Q: 设置会丢失吗？</h3>
+<p>A: 不会。所有设置（连发配置、键位对调、宏内容）会自动保存到程序同目录的 <code>config.json</code> 文件，下次启动自动恢复。</p>
+
+<hr>
+
+<p style="color: #999; text-align: center; margin-top: 40px;">丐帮高手 v4.0 | 基于 Interception 驱动 | MIT License</p>
 
 </body>
 </html>
