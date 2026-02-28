@@ -2446,8 +2446,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
-    /* UTF-8: 丐帮高手v3 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv4.0";
+    /* UTF-8: 丐帮高手v4.1 - convert at runtime to avoid source encoding issues */
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv4.1";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(0, L"AutoKeyClass",
