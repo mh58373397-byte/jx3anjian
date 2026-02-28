@@ -1037,70 +1037,83 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         HFONT hf = g_font_ui;
-        int y = 10, x = 10;
+        int y = 10;
         HWND lbl;
 
         /* Row 0: macro selector & management */
-        lbl = CreateWindowW(L"STATIC", L"\u5F53\u524D\u5B8F:", WS_CHILD|WS_VISIBLE, x, y+4, 55, 20, hwnd, NULL, NULL, NULL);
-        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE); x += 58;
+        lbl = CreateWindowW(L"STATIC", L"\u5F53\u524D\u5B8F:", WS_CHILD|WS_VISIBLE, 10, y+4, 55, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
         s_combo = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL,
-            x, y, 130, 300, hwnd, (HMENU)(INT_PTR)IDC_M_COMBO_SLOT, NULL, NULL);
+            68, y, 150, 300, hwnd, (HMENU)(INT_PTR)IDC_M_COMBO_SLOT, NULL, NULL);
         SendMessageW(s_combo, WM_SETFONT, (WPARAM)hf, TRUE);
         s_rename_edit = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_BORDER|ES_AUTOHSCROLL,
-            x, y+2, 130, 24, hwnd, (HMENU)(INT_PTR)IDC_M_RENAME_EDIT, NULL, NULL);
+            68, y+2, 150, 24, hwnd, (HMENU)(INT_PTR)IDC_M_RENAME_EDIT, NULL, NULL);
         SendMessageW(s_rename_edit, WM_SETFONT, (WPARAM)hf, TRUE);
         s_rename_origproc = (WNDPROC)SetWindowLongPtrW(s_rename_edit, GWLP_WNDPROC, (LONG_PTR)rename_edit_subproc);
         for (int i = 0; i < g_macro_slot_count; i++)
             SendMessageW(s_combo, CB_ADDSTRING, 0, (LPARAM)g_macro_slots[i].name);
         SendMessageW(s_combo, CB_SETCURSEL, s_current_slot, 0);
-        x += 134;
-        s_btn_new = CreateWindowW(L"BUTTON", L"\u65B0\u5EFA", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 50, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_NEW, NULL, NULL); x += 54;
-        CreateWindowW(L"BUTTON", L"\u5220\u9664", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 50, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_DEL, NULL, NULL); x += 54;
-        CreateWindowW(L"BUTTON", L"\u6539\u540D", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 50, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_RENAME, NULL, NULL); x += 60;
-        s_chk_enabled = CreateWindowW(L"BUTTON", L"\u751F\u6548", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, x, y+4, 55, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_ENABLED, NULL, NULL);
-        SendMessageW(s_chk_enabled, WM_SETFONT, (WPARAM)hf, TRUE); x += 60;
-        s_chk_press_mode = CreateWindowW(L"BUTTON", L"\u6309\u538B\u6A21\u5F0F", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, x, y+4, 85, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_PRESS_MODE, NULL, NULL);
-        SendMessageW(s_chk_press_mode, WM_SETFONT, (WPARAM)hf, TRUE); x += 90;
-        s_chk_mouse_track = CreateWindowW(L"BUTTON", L"\u5F55\u5236\u9F20\u6807\u8F68\u8FF9", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, x, y+4, 110, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_MOUSE_TRACK, NULL, NULL);
-        SendMessageW(s_chk_mouse_track, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_btn_new = CreateWindowW(L"BUTTON", L"\u65B0\u5EFA", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 232, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_NEW, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"\u5220\u9664", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 300, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_DEL, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"\u6539\u540D", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 368, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_RENAME, NULL, NULL);
+        s_chk_enabled = CreateWindowW(L"BUTTON", L"\u751F\u6548", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 446, y+4, 55, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_ENABLED, NULL, NULL);
+        SendMessageW(s_chk_enabled, WM_SETFONT, (WPARAM)hf, TRUE);
 
-        /* Row 1: all hotkeys */
-        y += 34; x = 10;
-        lbl = CreateWindowW(L"STATIC", L"\u5B8F\u542F\u505C\u952E:", WS_CHILD|WS_VISIBLE, x, y+5, 70, 20, hwnd, NULL, NULL, NULL);
-        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE); x += 72;
-        s_lbl_macro_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, x, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_MACRO_HK, NULL, NULL);
-        SendMessageW(s_lbl_macro_hk, WM_SETFONT, (WPARAM)hf, TRUE); x += 68;
-        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_MACRO_HK, NULL, NULL); x += 45;
-        lbl = CreateWindowW(L"STATIC", L"\u5F55\u5236\u70ED\u952E:", WS_CHILD|WS_VISIBLE, x, y+5, 68, 20, hwnd, NULL, NULL, NULL);
-        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE); x += 70;
-        s_lbl_rec_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, x, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_REC_HK, NULL, NULL);
-        SendMessageW(s_lbl_rec_hk, WM_SETFONT, (WPARAM)hf, TRUE); x += 68;
-        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_REC_HK, NULL, NULL); x += 45;
-        lbl = CreateWindowW(L"STATIC", L"\u5168\u5C40\u505C\u6B62\u952E:", WS_CHILD|WS_VISIBLE, x, y+5, 80, 20, hwnd, NULL, NULL, NULL);
-        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE); x += 82;
-        s_lbl_stop_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, x, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_STOP_HK, NULL, NULL);
-        SendMessageW(s_lbl_stop_hk, WM_SETFONT, (WPARAM)hf, TRUE); x += 68;
-        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_STOP_HK, NULL, NULL);
+        lbl = CreateWindowW(L"STATIC", L"\u70ED\u952E\u8BBE\u7F6E", WS_CHILD|WS_VISIBLE, 10, y+40, 80, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"STATIC", NULL, WS_CHILD|WS_VISIBLE|SS_ETCHEDHORZ, 92, y+48, MACRO_WND_W-112, 2, hwnd, NULL, NULL, NULL);
+
+        /* Row 1: hotkeys */
+        y += 62;
+        lbl = CreateWindowW(L"STATIC", L"\u5F53\u524D\u5B8F\u542F\u505C\u952E:", WS_CHILD|WS_VISIBLE, 10, y+5, 96, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_lbl_macro_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, 108, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_MACRO_HK, NULL, NULL);
+        SendMessageW(s_lbl_macro_hk, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 176, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_MACRO_HK, NULL, NULL);
+
+        s_chk_press_mode = CreateWindowW(L"BUTTON", L"\u6309\u538B\u6A21\u5F0F", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 214, y+4, 88, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_PRESS_MODE, NULL, NULL);
+        SendMessageW(s_chk_press_mode, WM_SETFONT, (WPARAM)hf, TRUE);
+
+        lbl = CreateWindowW(L"STATIC", L"\u5F55\u5236\u70ED\u952E:", WS_CHILD|WS_VISIBLE, 310, y+5, 68, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_lbl_rec_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, 380, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_REC_HK, NULL, NULL);
+        SendMessageW(s_lbl_rec_hk, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 448, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_REC_HK, NULL, NULL);
+
+        lbl = CreateWindowW(L"STATIC", L"\u5168\u5C40\u505C\u6B62\u952E:", WS_CHILD|WS_VISIBLE, 486, y+5, 80, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_lbl_stop_hk = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE|SS_CENTER|WS_BORDER, 568, y+2, 65, 22, hwnd, (HMENU)(INT_PTR)IDC_M_LBL_STOP_HK, NULL, NULL);
+        SendMessageW(s_lbl_stop_hk, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"BUTTON", L"\u6539", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 636, y+1, 30, 24, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SET_STOP_HK, NULL, NULL);
+
+        lbl = CreateWindowW(L"STATIC", L"\u5F55\u5236\u4E0E\u4FDD\u5B58", WS_CHILD|WS_VISIBLE, 10, y+34, 90, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"STATIC", NULL, WS_CHILD|WS_VISIBLE|SS_ETCHEDHORZ, 104, y+42, MACRO_WND_W-124, 2, hwnd, NULL, NULL, NULL);
 
         /* Row 2: recording controls */
-        y += 34; x = 10;
-        CreateWindowW(L"BUTTON", L"\u5F00\u59CB\u5F55\u5236", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 80, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_REC, NULL, NULL); x += 84;
-        CreateWindowW(L"BUTTON", L"\u505C\u6B62\u5F55\u5236", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 80, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_STOPREC, NULL, NULL); x += 94;
-        lbl = CreateWindowW(L"STATIC", L"\u5FAA\u73AF\u6B21\u6570:", WS_CHILD|WS_VISIBLE, x, y+5, 65, 20, hwnd, NULL, NULL, NULL);
-        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE); x += 67;
-        s_edit_loops = CreateWindowW(L"EDIT", L"1", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, x, y+2, 45, 24, hwnd, (HMENU)(INT_PTR)IDC_M_EDIT_LOOPS, NULL, NULL);
-        SendMessageW(s_edit_loops, WM_SETFONT, (WPARAM)hf, TRUE); x += 50;
-        s_chk_infinite = CreateWindowW(L"BUTTON", L"\u65E0\u9650", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, x, y+4, 50, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_INFINITE, NULL, NULL);
-        SendMessageW(s_chk_infinite, WM_SETFONT, (WPARAM)hf, TRUE); x += 60;
-        CreateWindowW(L"BUTTON", L"\u4FDD\u5B58", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 55, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SAVE, NULL, NULL); x += 60;
-        CreateWindowW(L"BUTTON", L"\u52A0\u8F7D", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, 55, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_LOAD, NULL, NULL);
+        y += 54;
+        CreateWindowW(L"BUTTON", L"\u5F00\u59CB\u5F55\u5236", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 10, y, 90, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_REC, NULL, NULL);
+        s_chk_mouse_track = CreateWindowW(L"BUTTON", L"\u5F55\u5236\u9F20\u6807\u8F68\u8FF9", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 108, y+4, 96, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_MOUSE_TRACK, NULL, NULL);
+        SendMessageW(s_chk_mouse_track, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"BUTTON", L"\u505C\u6B62\u5F55\u5236", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 210, y, 90, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_STOPREC, NULL, NULL);
+        lbl = CreateWindowW(L"STATIC", L"\u5FAA\u73AF\u6B21\u6570:", WS_CHILD|WS_VISIBLE, 316, y+5, 65, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_edit_loops = CreateWindowW(L"EDIT", L"1", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 384, y+2, 45, 24, hwnd, (HMENU)(INT_PTR)IDC_M_EDIT_LOOPS, NULL, NULL);
+        SendMessageW(s_edit_loops, WM_SETFONT, (WPARAM)hf, TRUE);
+        s_chk_infinite = CreateWindowW(L"BUTTON", L"\u65E0\u9650", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 438, y+4, 55, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_INFINITE, NULL, NULL);
+        SendMessageW(s_chk_infinite, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"BUTTON", L"\u4FDD\u5B58", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 524, y, 74, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_SAVE, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"\u52A0\u8F7D", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 606, y, 74, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_LOAD, NULL, NULL);
 
         /* Set font for all child controls */
         for (HWND ch = GetWindow(hwnd, GW_CHILD); ch; ch = GetWindow(ch, GW_HWNDNEXT))
             SendMessageW(ch, WM_SETFONT, (WPARAM)hf, TRUE);
 
         /* Script edit */
-        y += 38;
+        lbl = CreateWindowW(L"STATIC", L"\u5B8F\u811A\u672C", WS_CHILD|WS_VISIBLE, 10, y+36, 70, 20, hwnd, NULL, NULL, NULL);
+        SendMessageW(lbl, WM_SETFONT, (WPARAM)hf, TRUE);
+        CreateWindowW(L"STATIC", NULL, WS_CHILD|WS_VISIBLE|SS_ETCHEDHORZ, 82, y+44, MACRO_WND_W-102, 2, hwnd, NULL, NULL, NULL);
+        y += 60;
         s_edit = CreateWindowW(L"EDIT", L"",
             WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|WS_HSCROLL|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|ES_WANTRETURN,
             10, y, MACRO_WND_W - 30, MACRO_WND_H - y - 50, hwnd, (HMENU)(INT_PTR)IDC_M_EDIT, NULL, NULL);
@@ -1173,6 +1186,24 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case WM_MACRO_KBD_HK: {
+        int kvk = (int)wp;
+        if (kvk == g_macro_hk_rec_vk) {
+            if (g_macro_recording) stop_recording(); else start_recording();
+        }
+        if (kvk == g_macro_hk_stop_vk) {
+            if (s_macro_playing) stop_playback();
+            if (g_macro_recording) stop_recording();
+        }
+        for (int mi = 0; mi < g_macro_slot_count; mi++) {
+            if (g_macro_slots[mi].hk_play_vk == kvk && g_macro_slots[mi].enabled) {
+                macro_handle_play_hotkey(mi);
+                break;
+            }
+        }
+        return 0;
+    }
+
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDC_M_COMBO_SLOT:
@@ -1199,6 +1230,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     for (int j = 0; j < g_macro_slot_count; j++) if (lstrcmpW(g_macro_slots[j].name, trial)==0) { dup=TRUE; break; }
                     if (!dup) { lstrcpyW(g_macro_slots[idx].name, trial); break; } num++; } }
                 g_macro_slots[idx].loops = 1;
+                g_macro_slots[idx].infinite = TRUE;
                 g_macro_slots[idx].enabled = TRUE;
                 g_macro_slot_count++;
                 s_current_slot = idx;

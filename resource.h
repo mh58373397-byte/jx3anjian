@@ -1,2 +1,3 @@
 #define IDR_INTERCEPTION_DLL  101
 #define IDR_INSTALL_EXE       102
+#define IDI_APP_ICON          103

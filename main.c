@@ -142,6 +142,7 @@ static BOOL load_interception_dll(void) {
 #define IDM_GM_TOGGLE      200
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
+#define WM_PLAY_TOGGLE_SOUND (WM_APP + 10)
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
 #define MID_LBUTTON   0x200
@@ -177,6 +178,9 @@ static volatile unsigned short     g_hflags[MAX_KID];
 static volatile BOOL               g_toggled[MAX_KID];
 static volatile InterceptionDevice g_tdev[MAX_KID];
 static volatile unsigned short     g_tflags[MAX_KID];
+static volatile InterceptionDevice g_last_kbd_dev = 0;
+static volatile InterceptionDevice g_last_mouse_dev = 0;
+static volatile BOOL               g_macro_kbd_hk_down[MAX_KID];
 
 static BOOL  g_exclude[256];
 static BOOL  g_custom_keys[256];
@@ -188,6 +192,14 @@ static int   g_game_x = 1295, g_game_y = 253, g_game_w = 200, g_game_h = 80;
 int   g_hk_toggle_vk = VK_F1;
 int   g_hk_game_vk   = VK_F9;
 static int   g_setting_hk   = 0;
+static BOOL  g_hk_toggle_fallback = FALSE;
+static BOOL  g_hk_game_fallback   = FALSE;
+static BOOL  g_hk_toggle_down     = FALSE;
+static BOOL  g_hk_game_down       = FALSE;
+static BOOL  g_ihk_toggle_down    = FALSE;
+static BOOL  g_ihk_game_down      = FALSE;
+static DWORD g_last_hk_toggle_msg_tick = 0;
+static DWORD g_last_hk_game_msg_tick   = 0;
 
 static BOOL  g_key_lock     = FALSE;
 static BOOL  g_turbo        = FALSE;
@@ -198,6 +210,8 @@ static BOOL  g_sound_enabled = TRUE;
 static BOOL  g_swap_enabled    = FALSE;
 static BOOL  g_swap_no_start  = FALSE;
 static int   g_key_swap[256];
+static BOOL  g_sound_open_ready = FALSE;
+static BOOL  g_sound_close_ready = FALSE;
 
 static int   g_drag_src_idx = -1;
 static int   g_drag_dst_idx = -1;
@@ -533,6 +547,7 @@ static void load_config(void) {
     p = strstr(buf, "\"game_h\""); if (p) { p = strchr(p, ':'); if (p) { g_game_h = atoi(p+1); if (g_game_h<40) g_game_h=80; } }
     p = strstr(buf, "\"hk_toggle\""); if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_toggle_vk=v; } }
     p = strstr(buf, "\"hk_game\"");   if (p) { p = strchr(p, ':'); if (p) { int v=atoi(p+1); if (v>0 && v<256) g_hk_game_vk=v; } }
+    if (g_hk_toggle_vk == g_hk_game_vk) g_hk_game_vk = VK_F9;
     p = strstr(buf, "\"key_lock\""); if (p) { p = strchr(p, ':'); if (p) g_key_lock = (atoi(p+1) != 0); }
     p = strstr(buf, "\"turbo\"");    if (p) { p = strchr(p, ':'); if (p) g_turbo = (atoi(p+1) != 0); }
     p = strstr(buf, "\"pause_toggle_on_hold\""); if (p) { p = strchr(p, ':'); if (p) g_pause_toggle_on_hold = (atoi(p+1) != 0); }
@@ -686,8 +701,9 @@ static BOOL is_mouse_vk(int vk) {
 static void perform_key_swap(int vk_a, int vk_b) {
     if (vk_a <= 0 || vk_a >= 256 || vk_b <= 0 || vk_b >= 256) return;
     if (vk_a == vk_b) return;
-    if (is_skippable(vk_a) || is_skippable(vk_b)) return;
-    if (is_mouse_vk(vk_a) || is_mouse_vk(vk_b)) return;
+    /* 对调时仅禁用主功能热键，允许宏绑定键（蓝色键）参与对调 */
+    if (vk_a == g_hk_toggle_vk || vk_a == g_hk_game_vk ||
+        vk_b == g_hk_toggle_vk || vk_b == g_hk_game_vk) return;
     int old_a = g_key_swap[vk_a];
     int old_b = g_key_swap[vk_b];
     if (old_a && old_a != vk_b) g_key_swap[old_a] = 0;
@@ -700,6 +716,22 @@ static void perform_key_swap(int vk_a, int vk_b) {
         g_key_swap[vk_b] = vk_a;
     }
     save_config();
+}
+
+static void toggle_key_mode_by_vk(int vk) {
+    if (vk <= 0 || vk >= 256) return;
+    if (!is_skippable(vk)) {
+        if (g_mode == MODE_HOLD) {
+            g_exclude[vk] = !g_exclude[vk];
+        } else if (g_mode == MODE_CUSTOM) {
+            g_custom_keys[vk] = !g_custom_keys[vk];
+        } else {
+            if (g_custom_keys[vk])          { g_custom_keys[vk]=FALSE; g_exclude[vk]=TRUE; }
+            else if (!g_exclude[vk])        { g_custom_keys[vk]=TRUE; }
+            else                            { g_exclude[vk]=FALSE; }
+        }
+        save_config();
+    }
 }
 
 static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0) {
@@ -923,6 +955,27 @@ static const struct { int mid; int vk; unsigned short dn; unsigned short up; } g
 };
 #define N_MOUSE_BTNS (sizeof(g_mouse_btns)/sizeof(g_mouse_btns[0]))
 
+static BOOL mouse_vk_to_bits(int vk, unsigned short *dn, unsigned short *up) {
+    for (int i = 0; i < (int)N_MOUSE_BTNS; i++) {
+        if (g_mouse_btns[i].vk == vk) {
+            *dn = g_mouse_btns[i].dn;
+            *up = g_mouse_btns[i].up;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static InterceptionDevice pick_keyboard_out_dev(void) {
+    if (g_last_kbd_dev) return g_last_kbd_dev;
+    return INTERCEPTION_KEYBOARD(0);
+}
+
+static InterceptionDevice pick_mouse_out_dev(void) {
+    if (g_last_mouse_dev) return g_last_mouse_dev;
+    return INTERCEPTION_MOUSE(0);
+}
+
 static DWORD WINAPI intercept_proc(LPVOID p) {
     (void)p;
     interception_set_filter(g_ctx, interception_is_keyboard, INTERCEPTION_FILTER_KEY_ALL);
@@ -936,7 +989,11 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
         InterceptionDevice dev = interception_wait_with_timeout(g_ctx, INTERCEPT_POLL_MS);
         if (dev == 0) continue;
         InterceptionStroke stroke;
+        BOOL forward_original = TRUE;
         if (interception_receive(g_ctx, dev, &stroke, 1) <= 0) continue;
+        if (interception_is_keyboard(dev)) g_last_kbd_dev = dev;
+        if (interception_is_mouse(dev)) g_last_mouse_dev = dev;
+
         if (interception_is_keyboard(dev) && g_swap_enabled && (g_active || g_swap_no_start)) {
             InterceptionKeyStroke *ksw = (InterceptionKeyStroke *)&stroke;
             int skid = KID(ksw->code, ksw->state);
@@ -944,22 +1001,65 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 int svk = kid_to_vk(skid);
                 if (svk > 0 && svk < 256 && g_key_swap[svk]) {
                     int nvk = g_key_swap[svk];
-                    unsigned short nsc; BOOL ne0;
-                    vk_to_sc_e0(nvk, &nsc, &ne0);
-                    ksw->code = nsc;
-                    if (ne0)
-                        ksw->state |= INTERCEPTION_KEY_E0;
-                    else
-                        ksw->state &= ~INTERCEPTION_KEY_E0;
+                    if (is_mouse_vk(nvk)) {
+                        unsigned short dn, up;
+                        InterceptionDevice out_mouse = pick_mouse_out_dev();
+                        if (mouse_vk_to_bits(nvk, &dn, &up) && out_mouse) {
+                            InterceptionMouseStroke ms2;
+                            memset(&ms2, 0, sizeof(ms2));
+                            ms2.state = (ksw->state & INTERCEPTION_KEY_UP) ? up : dn;
+                            interception_send(g_ctx, out_mouse, (InterceptionStroke *)&ms2, 1);
+                            forward_original = FALSE;
+                        }
+                    } else {
+                        unsigned short nsc; BOOL ne0;
+                        vk_to_sc_e0(nvk, &nsc, &ne0);
+                        ksw->code = nsc;
+                        if (ne0)
+                            ksw->state |= INTERCEPTION_KEY_E0;
+                        else
+                            ksw->state &= ~INTERCEPTION_KEY_E0;
+                    }
                 }
             }
         }
-        if (interception_is_keyboard(dev)) {
+        if (forward_original && interception_is_keyboard(dev)) {
             InterceptionKeyStroke *ks = (InterceptionKeyStroke *)&stroke;
             int kid = KID(ks->code, ks->state);
             if (kid >= 0 && kid < 0x200) {
                 int vk = kid_to_vk(kid);
+                if (vk == g_hk_toggle_vk) {
+                    if (ks->state & INTERCEPTION_KEY_UP) g_ihk_toggle_down = FALSE;
+                    else if (!g_ihk_toggle_down && !g_setting_hk) {
+                        g_ihk_toggle_down = TRUE;
+                        PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_TOGGLE, 0);
+                    }
+                }
+                if (vk == g_hk_game_vk) {
+                    if (ks->state & INTERCEPTION_KEY_UP) g_ihk_game_down = FALSE;
+                    else if (!g_ihk_game_down && !g_setting_hk) {
+                        g_ihk_game_down = TRUE;
+                        PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_GAME, 0);
+                    }
+                }
                 BOOL is_hk = (vk == g_hk_toggle_vk || vk == g_hk_game_vk);
+                if (ks->state & INTERCEPTION_KEY_UP) {
+                    g_macro_kbd_hk_down[kid] = FALSE;
+                } else if (!g_macro_kbd_hk_down[kid]) {
+                    g_macro_kbd_hk_down[kid] = TRUE;
+                    /* 键盘宏热键也走 Interception 触发，避免某些游戏焦点下 RegisterHotKey 失效 */
+                    HWND mhwnd = macro_get_hwnd();
+                    if (mhwnd) {
+                        PostMessageW(mhwnd, WM_MACRO_KBD_HK, (WPARAM)vk, 0);
+                    } else if (g_macro_active && (g_active || g_macro_no_start)) {
+                        if (vk == g_macro_hk_stop_vk)
+                            PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + MAX_MACRO_SLOTS, 0);
+                        for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++) {
+                            if (g_macro_slots[mi2].hk_play_vk == vk && g_macro_slots[mi2].enabled)
+                                PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + mi2, 0);
+                        }
+                    }
+                }
                 if (ks->state & INTERCEPTION_KEY_UP) {
                     if (!is_hk) {
                         g_held[kid]=FALSE; g_hdev[kid]=0;
@@ -971,8 +1071,13 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 } else if (!is_hk) {
                     if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[kid]) {
                         if (!is_skippable(vk) && vk>0 && vk<256 && g_custom_keys[vk]) {
-                            if (g_toggled[kid]) { g_toggled[kid]=FALSE; g_tdev[kid]=0; active_remove(kid); }
-                            else { g_toggled[kid]=TRUE; g_tdev[kid]=dev; g_tflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP; active_add(kid); }
+                            if (g_toggled[kid]) {
+                                g_toggled[kid]=FALSE; g_tdev[kid]=0; active_remove(kid);
+                                PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
+                            } else {
+                                g_toggled[kid]=TRUE; g_tdev[kid]=dev; g_tflags[kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP; active_add(kid);
+                                PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
+                            }
                         }
                     }
                     g_held[kid]=TRUE; g_hdev[kid]=dev;
@@ -990,6 +1095,51 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
             }
         } else if (interception_is_mouse(dev)) {
             InterceptionMouseStroke *ms = (InterceptionMouseStroke *)&stroke;
+            if (g_swap_enabled && (g_active || g_swap_no_start) && ms->state) {
+                unsigned short src_state = ms->state;
+                unsigned short out_state = 0;
+                InterceptionDevice out_kbd = pick_keyboard_out_dev();
+                for (int i = 0; i < (int)N_MOUSE_BTNS; i++) {
+                    BOOL has_dn = !!(src_state & g_mouse_btns[i].dn);
+                    BOOL has_up = !!(src_state & g_mouse_btns[i].up);
+                    if (!has_dn && !has_up) continue;
+
+                    int src_vk = g_mouse_btns[i].vk;
+                    int dst_vk = src_vk;
+                    if (src_vk > 0 && src_vk < 256 && g_key_swap[src_vk])
+                        dst_vk = g_key_swap[src_vk];
+
+                    if (is_mouse_vk(dst_vk)) {
+                        unsigned short dn2, up2;
+                        if (mouse_vk_to_bits(dst_vk, &dn2, &up2)) {
+                            if (has_dn) out_state |= dn2;
+                            if (has_up) out_state |= up2;
+                        }
+                    } else if (out_kbd) {
+                        unsigned short sc; BOOL e0;
+                        vk_to_sc_e0(dst_vk, &sc, &e0);
+                        if (has_dn) {
+                            InterceptionKeyStroke ks2;
+                            memset(&ks2, 0, sizeof(ks2));
+                            ks2.code = sc;
+                            ks2.state = e0 ? INTERCEPTION_KEY_E0 : 0;
+                            interception_send(g_ctx, out_kbd, (InterceptionStroke *)&ks2, 1);
+                        }
+                        if (has_up) {
+                            InterceptionKeyStroke ks2;
+                            memset(&ks2, 0, sizeof(ks2));
+                            ks2.code = sc;
+                            ks2.state = (e0 ? INTERCEPTION_KEY_E0 : 0) | INTERCEPTION_KEY_UP;
+                            interception_send(g_ctx, out_kbd, (InterceptionStroke *)&ks2, 1);
+                        }
+                    } else {
+                        if (has_dn) out_state |= g_mouse_btns[i].dn;
+                        if (has_up) out_state |= g_mouse_btns[i].up;
+                    }
+                }
+                ms->state = out_state;
+                if (ms->state == 0) forward_original = FALSE;
+            }
             for (int b = 0; b < (int)N_MOUSE_BTNS; b++) {
                 int mid = g_mouse_btns[b].mid, vk = g_mouse_btns[b].vk;
                 if (ms->state & g_mouse_btns[b].up) {
@@ -1002,8 +1152,13 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 if (ms->state & g_mouse_btns[b].dn) {
                     if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[mid]) {
                         if (!is_excluded(vk) && vk>0 && vk<256 && g_custom_keys[vk]) {
-                            if (g_toggled[mid]) { g_toggled[mid]=FALSE; g_tdev[mid]=0; active_remove(mid); }
-                            else { g_toggled[mid]=TRUE; g_tdev[mid]=dev; active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up); }
+                            if (g_toggled[mid]) {
+                                g_toggled[mid]=FALSE; g_tdev[mid]=0; active_remove(mid);
+                                PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
+                            } else {
+                                g_toggled[mid]=TRUE; g_tdev[mid]=dev; active_add_mouse(mid, vk, g_mouse_btns[b].dn, g_mouse_btns[b].up);
+                                PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
+                            }
                         }
                     }
                     g_held[mid]=TRUE; g_hdev[mid]=dev;
@@ -1036,7 +1191,8 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 macro_push_event(&me);
             }
         }
-        interception_send(g_ctx, dev, &stroke, 1);
+        if (forward_original)
+            interception_send(g_ctx, dev, &stroke, 1);
     }
     return 0;
 }
@@ -1156,17 +1312,74 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
 
 static void play_toggle_sound(BOOL on) {
     if (!g_sound_enabled) return;
-    WCHAR path[MAX_PATH];
-    get_exe_dir(path, MAX_PATH);
-    if (on)
+    const WCHAR *alias = on ? L"togglesnd_on" : L"togglesnd_off";
+    BOOL *ready = on ? &g_sound_open_ready : &g_sound_close_ready;
+    if (!*ready) {
+        WCHAR path[MAX_PATH];
+        get_exe_dir(path, MAX_PATH);
+        if (on)
+            lstrcatW(path, L"\x6309\x952E\x5F00\x542F.mp3");
+        else
+            lstrcatW(path, L"\x6309\x952E\x5173\x95ED.mp3");
+        WCHAR open_cmd[MAX_PATH + 96];
+        wsprintfW(open_cmd, L"open \"%s\" type mpegvideo alias %s", path, alias);
+        if (mciSendStringW(open_cmd, NULL, 0, NULL) == 0) {
+            WCHAR fmt_cmd[64];
+            wsprintfW(fmt_cmd, L"set %s time format milliseconds", alias);
+            mciSendStringW(fmt_cmd, NULL, 0, NULL);
+            *ready = TRUE;
+        } else {
+            return;
+        }
+    }
+    {
+        WCHAR stop_cmd[64];
+        WCHAR seek_cmd[64];
+        WCHAR play_cmd[64];
+        wsprintfW(stop_cmd, L"stop %s", alias);
+        wsprintfW(seek_cmd, L"seek %s to start", alias);
+        wsprintfW(play_cmd, L"play %s", alias);
+        mciSendStringW(stop_cmd, NULL, 0, NULL);
+        mciSendStringW(seek_cmd, NULL, 0, NULL);
+        mciSendStringW(play_cmd, NULL, 0, NULL);
+    }
+}
+
+static void prepare_toggle_sounds(void) {
+    if (!g_sound_enabled) return;
+    if (!g_sound_open_ready) {
+        WCHAR path[MAX_PATH];
+        get_exe_dir(path, MAX_PATH);
         lstrcatW(path, L"\x6309\x952E\x5F00\x542F.mp3");
-    else
+        WCHAR open_cmd[MAX_PATH + 96];
+        wsprintfW(open_cmd, L"open \"%s\" type mpegvideo alias togglesnd_on", path);
+        if (mciSendStringW(open_cmd, NULL, 0, NULL) == 0) {
+            mciSendStringW(L"set togglesnd_on time format milliseconds", NULL, 0, NULL);
+            g_sound_open_ready = TRUE;
+        }
+    }
+    if (!g_sound_close_ready) {
+        WCHAR path[MAX_PATH];
+        get_exe_dir(path, MAX_PATH);
         lstrcatW(path, L"\x6309\x952E\x5173\x95ED.mp3");
-    WCHAR cmd[MAX_PATH + 64];
-    wsprintfW(cmd, L"open \"%s\" type mpegvideo alias togglesnd", path);
-    mciSendStringW(L"close togglesnd", NULL, 0, NULL);
-    mciSendStringW(cmd, NULL, 0, NULL);
-    mciSendStringW(L"play togglesnd from 0", NULL, 0, NULL);
+        WCHAR open_cmd[MAX_PATH + 96];
+        wsprintfW(open_cmd, L"open \"%s\" type mpegvideo alias togglesnd_off", path);
+        if (mciSendStringW(open_cmd, NULL, 0, NULL) == 0) {
+            mciSendStringW(L"set togglesnd_off time format milliseconds", NULL, 0, NULL);
+            g_sound_close_ready = TRUE;
+        }
+    }
+}
+
+static void release_toggle_sounds(void) {
+    if (g_sound_open_ready) {
+        mciSendStringW(L"close togglesnd_on", NULL, 0, NULL);
+        g_sound_open_ready = FALSE;
+    }
+    if (g_sound_close_ready) {
+        mciSendStringW(L"close togglesnd_off", NULL, 0, NULL);
+        g_sound_close_ready = FALSE;
+    }
 }
 
 static void update_sound_btn(void) {
@@ -1237,26 +1450,77 @@ static void toggle_game_mode(HWND hwnd) {
 /* ================================================================== */
 
 static void update_hotkey_labels(void);
+static void apply_hotkey_registration(HWND hwnd);
+static void clear_hotkey_registration(HWND hwnd);
+
+static void clear_hotkey_registration(HWND hwnd) {
+    UnregisterHotKey(hwnd, ID_HK_TOGGLE);
+    UnregisterHotKey(hwnd, ID_HK_GAME);
+    g_hk_toggle_fallback = FALSE;
+    g_hk_game_fallback = FALSE;
+    g_hk_toggle_down = FALSE;
+    g_hk_game_down = FALSE;
+    g_ihk_toggle_down = FALSE;
+    g_ihk_game_down = FALSE;
+    memset((void *)g_macro_kbd_hk_down, 0, sizeof(g_macro_kbd_hk_down));
+}
+
+static void apply_hotkey_registration(HWND hwnd) {
+    clear_hotkey_registration(hwnd);
+    if (!RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk))
+        g_hk_toggle_fallback = TRUE;
+    if (!RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk))
+        g_hk_game_fallback = TRUE;
+}
 
 static LRESULT CALLBACK kb_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION && g_setting_hk && wParam == WM_KEYDOWN) {
+    if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
         int vk = (int)p->vkCode;
-        if (vk == VK_ESCAPE) { g_setting_hk = 0; update_hotkey_labels(); return 1; }
-        if (g_setting_hk == 1) {
-            UnregisterHotKey(g_hwnd, ID_HK_TOGGLE);
-            g_hk_toggle_vk = vk;
-            RegisterHotKey(g_hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
-        } else if (g_setting_hk == 2) {
-            UnregisterHotKey(g_hwnd, ID_HK_GAME);
-            g_hk_game_vk = vk;
-            RegisterHotKey(g_hwnd, ID_HK_GAME, 0, g_hk_game_vk);
+        BOOL is_down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        BOOL is_up = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+
+        if (g_setting_hk && is_down) {
+            if (vk == VK_ESCAPE) { g_setting_hk = 0; update_hotkey_labels(); return 1; }
+            if (g_setting_hk == 1 && vk == g_hk_game_vk) {
+                MessageBoxW(g_hwnd, L"\x5168\x5C40\x542F\x52A8\x952E\x4E0D\x80FD\x4E0E\x6E38\x620F\x6A21\x5F0F\x952E\x76F8\x540C\x3002",
+                    L"\x63D0\x793A", MB_ICONWARNING);
+                g_setting_hk = 0;
+                update_hotkey_labels();
+                return 1;
+            }
+            if (g_setting_hk == 2 && vk == g_hk_toggle_vk) {
+                MessageBoxW(g_hwnd, L"\x6E38\x620F\x6A21\x5F0F\x952E\x4E0D\x80FD\x4E0E\x5168\x5C40\x542F\x52A8\x952E\x76F8\x540C\x3002",
+                    L"\x63D0\x793A", MB_ICONWARNING);
+                g_setting_hk = 0;
+                update_hotkey_labels();
+                return 1;
+            }
+            if (g_setting_hk == 1) g_hk_toggle_vk = vk;
+            else if (g_setting_hk == 2) g_hk_game_vk = vk;
+            apply_hotkey_registration(g_hwnd);
+            g_setting_hk = 0;
+            save_config();
+            update_hotkey_labels();
+            InvalidateRect(g_hwnd, NULL, TRUE);
+            return 1;
         }
-        g_setting_hk = 0;
-        save_config();
-        update_hotkey_labels();
-        InvalidateRect(g_hwnd, NULL, TRUE);
-        return 1;
+
+        if (!(p->flags & LLKHF_INJECTED)) {
+            if (is_down) {
+                if (vk == g_hk_toggle_vk && !g_hk_toggle_down) {
+                    g_hk_toggle_down = TRUE;
+                    PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_TOGGLE, 0);
+                }
+                if (g_hk_game_fallback && vk == g_hk_game_vk && !g_hk_game_down) {
+                    g_hk_game_down = TRUE;
+                    PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_GAME, 0);
+                }
+            } else if (is_up) {
+                if (vk == g_hk_toggle_vk) g_hk_toggle_down = FALSE;
+                if (vk == g_hk_game_vk) g_hk_game_down = FALSE;
+            }
+        }
     }
     return CallNextHookEx(g_kbhook, nCode, wParam, lParam);
 }
@@ -1705,6 +1969,7 @@ static void show_about_dialog(HWND hwndParent) {
     memset(&wc, 0, sizeof(wc));
     wc.lpfnWndProc = about_wndproc;
     wc.hInstance = GetModuleHandleW(NULL);
+    wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"AboutWndClass";
@@ -1775,11 +2040,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
 
     case WM_CREATE:
-        RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
-        RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk);
+        apply_hotkey_registration(hwnd);
         if (g_macro_active) macro_register_play_hotkeys(hwnd);
         SetTimer(hwnd, IDT_UI, UI_TIMER_MS, NULL);
         create_controls(hwnd);
+        prepare_toggle_sounds();
         return 0;
 
     case WM_TIMER:
@@ -1807,12 +2072,25 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
 
     case WM_HOTKEY:
-        if (wp == ID_HK_TOGGLE) toggle_active();
-        else if (wp == ID_HK_GAME) toggle_game_mode(hwnd);
+        if (wp == ID_HK_TOGGLE) {
+            DWORD now = GetTickCount();
+            if (now - g_last_hk_toggle_msg_tick < 120) return 0;
+            g_last_hk_toggle_msg_tick = now;
+            toggle_active();
+        } else if (wp == ID_HK_GAME) {
+            DWORD now = GetTickCount();
+            if (now - g_last_hk_game_msg_tick < 120) return 0;
+            g_last_hk_game_msg_tick = now;
+            toggle_game_mode(hwnd);
+        }
         else if (g_macro_active && (g_active || g_macro_no_start) && wp == ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
             macro_handle_play_hotkey(-1);
         else if (g_macro_active && (g_active || g_macro_no_start) && wp >= ID_HK_MACRO_BASE && wp < ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
             macro_handle_play_hotkey((int)(wp - ID_HK_MACRO_BASE));
+        return 0;
+
+    case WM_PLAY_TOGGLE_SOUND:
+        play_toggle_sound((BOOL)wp);
         return 0;
 
     case WM_COMMAND:
@@ -1959,13 +2237,14 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BTN_SOUND:
             g_sound_enabled = !g_sound_enabled;
             update_sound_btn();
+            if (g_sound_enabled) prepare_toggle_sounds();
+            else release_toggle_sounds();
             save_config();
             break;
         case IDC_BTN_MACRO:
             if (g_active) toggle_active();
             release_toggled();
-            UnregisterHotKey(hwnd, ID_HK_TOGGLE);
-            UnregisterHotKey(hwnd, ID_HK_GAME);
+            clear_hotkey_registration(hwnd);
             macro_unregister_play_hotkeys(hwnd);
             ShowWindow(hwnd, SW_HIDE);
             macro_show_window(hwnd);
@@ -2013,19 +2292,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     SetCapture(hwnd);
                 } else {
                     int vk = g_krects[idx].vk;
-                    if (!is_skippable(vk) && vk > 0 && vk < 256) {
-                        if (g_mode == MODE_HOLD) {
-                            g_exclude[vk] = !g_exclude[vk];
-                        } else if (g_mode == MODE_CUSTOM) {
-                            g_custom_keys[vk] = !g_custom_keys[vk];
-                        } else {
-                            if (g_custom_keys[vk])          { g_custom_keys[vk]=FALSE; g_exclude[vk]=TRUE; }
-                            else if (!g_exclude[vk])         { g_custom_keys[vk]=TRUE; }
-                            else                             { g_exclude[vk]=FALSE; }
-                        }
-                        save_config();
-                        InvalidateRect(hwnd, NULL, TRUE);
-                    }
+                    toggle_key_mode_by_vk(vk);
+                    InvalidateRect(hwnd, NULL, TRUE);
                 }
             }
         }
@@ -2055,6 +2323,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int vk_a = g_krects[g_drag_src_idx].vk;
                 int vk_b = g_krects[dst].vk;
                 perform_key_swap(vk_a, vk_b);
+            } else if (dst >= 0 && dst == g_drag_src_idx) {
+                int vk = g_krects[dst].vk;
+                if (g_swap_enabled && vk > 0 && vk < 256 && g_key_swap[vk])
+                    vk = g_key_swap[vk];
+                toggle_key_mode_by_vk(vk);
             }
             g_drag_src_idx = -1;
             g_drag_dst_idx = -1;
@@ -2089,8 +2362,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MACRO_CLOSED:
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        RegisterHotKey(hwnd, ID_HK_TOGGLE, 0, g_hk_toggle_vk);
-        RegisterHotKey(hwnd, ID_HK_GAME, 0, g_hk_game_vk);
+        apply_hotkey_registration(hwnd);
         if (g_macro_active) macro_register_play_hotkeys(hwnd);
         if (g_chk_macro_active) SendMessageW(g_chk_macro_active, BM_SETCHECK, g_macro_active ? BST_CHECKED : BST_UNCHECKED, 0);
         if (g_chk_macro_nostart) {
@@ -2102,9 +2374,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI);
-        UnregisterHotKey(hwnd, ID_HK_TOGGLE);
-        UnregisterHotKey(hwnd, ID_HK_GAME);
+        clear_hotkey_registration(hwnd);
         macro_unregister_play_hotkeys(hwnd);
+        release_toggle_sounds();
         PostQuitMessage(0);
         return 0;
     }
@@ -2160,6 +2432,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = wndproc;
     wc.hInstance      = hInst;
+    wc.hIcon         = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
     wc.lpszClassName = L"AutoKeyClass";
@@ -2181,6 +2454,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
         title_w,
         WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
         sx, sy, ww, wh, NULL, NULL, hInst, NULL);
+    {
+        HICON hIconLg = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
+        HICON hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+        if (hIconLg) SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconLg);
+        if (hIconSm) SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
+    }
 
     g_kbhook = SetWindowsHookExW(WH_KEYBOARD_LL, kb_hook_proc, hInst, 0);
 

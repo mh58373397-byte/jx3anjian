@@ -25,6 +25,7 @@ typedef struct {
 #define ID_HK_MACRO_BASE  100
 #define WM_MACRO_CLOSED   (WM_USER + 100)
 #define WM_MACRO_MOUSE_HK (WM_USER + 101)
+#define WM_MACRO_KBD_HK   (WM_USER + 102)
 
 typedef struct {
     WCHAR name[64];

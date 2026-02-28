@@ -5,3 +5,4 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
 IDR_INTERCEPTION_DLL  RCDATA  "interception.dll"
 IDR_INSTALL_EXE       RCDATA  "install-interception.exe"
+IDI_APP_ICON          ICON    "icon.ico"
