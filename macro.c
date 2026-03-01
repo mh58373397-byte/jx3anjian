@@ -73,6 +73,7 @@ extern PFN_get_hardware_id   pfn_get_hardware_id;
 
 #define MACRO_WND_W  700
 #define MACRO_WND_H  560
+#define WM_PLAY_TOGGLE_SOUND (WM_APP + 10)
 
 #define MAX_MACRO_EVENTS 50000
 #define MAX_MACRO_CMDS   50000
@@ -583,7 +584,7 @@ static void start_playback(void) {
     if (s_lbl_status) SetWindowTextW(s_lbl_status, L"\u72B6\u6001: \u6B63\u5728\u6267\u884C...");
 }
 
-static void start_playback_slot(int slot) {
+static void start_playback_slot(int slot, BOOL force_infinite) {
     if (s_macro_playing || g_macro_recording) return;
     if (!g_drv_ok || !g_ctx) return;
     if (slot < 0 || slot >= g_macro_slot_count) return;
@@ -591,7 +592,10 @@ static void start_playback_slot(int slot) {
     if (!ms->script || ms->script[0] == 0) return;
     s_play_cmd_count = parse_script(ms->script, s_play_cmds, MAX_MACRO_CMDS);
     if (s_play_cmd_count <= 0) return;
-    s_play_loop_total = ms->infinite ? 0 : (ms->loops < 1 ? 1 : ms->loops);
+    if (force_infinite)
+        s_play_loop_total = 0;
+    else
+        s_play_loop_total = ms->infinite ? 0 : (ms->loops < 1 ? 1 : ms->loops);
     s_play_loop_cur = 0;
     s_playing_slot = slot;
     s_macro_playing = TRUE;
@@ -745,25 +749,16 @@ static void apply_set_hotkey(int vk) {
         if (s_lbl_status) SetWindowTextW(s_lbl_status, L"\u72B6\u6001: \u8BE5\u952E\u5DF2\u88AB\u5360\u7528");
         return;
     }
-    BOOL is_mouse = macro_is_mouse_vk(vk);
     switch (s_macro_setting_hk) {
     case 1:
-        if (!macro_is_mouse_vk(g_macro_hk_rec_vk)) UnregisterHotKey(s_macro_hwnd, ID_M_HK_REC);
         g_macro_hk_rec_vk = vk;
-        if (!is_mouse) RegisterHotKey(s_macro_hwnd, ID_M_HK_REC, 0, vk);
         break;
     case 2:
-        if (!macro_is_mouse_vk(g_macro_hk_stop_vk)) UnregisterHotKey(s_macro_hwnd, ID_M_HK_STOP);
         g_macro_hk_stop_vk = vk;
-        if (!is_mouse) RegisterHotKey(s_macro_hwnd, ID_M_HK_STOP, 0, vk);
         break;
     case 3:
         if (s_current_slot >= 0 && s_current_slot < g_macro_slot_count) {
-            if (!macro_is_mouse_vk(g_macro_slots[s_current_slot].hk_play_vk))
-                UnregisterHotKey(s_macro_hwnd, ID_HK_MACRO_BASE + s_current_slot);
             g_macro_slots[s_current_slot].hk_play_vk = vk;
-            if (!is_mouse && g_macro_slots[s_current_slot].enabled)
-                RegisterHotKey(s_macro_hwnd, ID_HK_MACRO_BASE + s_current_slot, 0, vk);
         }
         break;
     }
@@ -1129,14 +1124,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (s_chk_press_mode) SendMessageW(s_chk_press_mode, BM_SETCHECK, g_macro_press_mode ? BST_CHECKED : BST_UNCHECKED, 0);
         update_hk_labels();
 
-        /* Register hotkeys & timer */
-        if (g_macro_hk_rec_vk > 0 && !macro_is_mouse_vk(g_macro_hk_rec_vk))
-            RegisterHotKey(hwnd, ID_M_HK_REC, 0, g_macro_hk_rec_vk);
-        if (g_macro_hk_stop_vk > 0 && !macro_is_mouse_vk(g_macro_hk_stop_vk))
-            RegisterHotKey(hwnd, ID_M_HK_STOP, 0, g_macro_hk_stop_vk);
-        for (int mi = 0; mi < g_macro_slot_count; mi++)
-            if (g_macro_slots[mi].hk_play_vk > 0 && g_macro_slots[mi].enabled && !macro_is_mouse_vk(g_macro_slots[mi].hk_play_vk))
-                RegisterHotKey(hwnd, ID_HK_MACRO_BASE + mi, 0, g_macro_slots[mi].hk_play_vk);
+        /* 热键统一走 main.c 的 Interception 转发，避免与 RegisterHotKey 双触发 */
         SetTimer(hwnd, IDT_M_STATUS, 200, NULL);
         return 0;
     }
@@ -1162,7 +1150,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == ID_M_HK_REC) {
             if (g_macro_recording) stop_recording(); else start_recording();
         } else if (wp == ID_M_HK_STOP) {
-            stop_playback();
+            macro_handle_play_hotkey(-1);
         } else if (wp >= ID_HK_MACRO_BASE && wp < ID_HK_MACRO_BASE + MAX_MACRO_SLOTS) {
             macro_handle_play_hotkey((int)(wp - ID_HK_MACRO_BASE));
         }
@@ -1174,7 +1162,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_macro_recording) stop_recording(); else start_recording();
         }
         if (mvk == g_macro_hk_stop_vk) {
-            if (s_macro_playing) stop_playback();
+            macro_handle_play_hotkey(-1);
             if (g_macro_recording) stop_recording();
         }
         for (int mi = 0; mi < g_macro_slot_count; mi++) {
@@ -1192,7 +1180,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_macro_recording) stop_recording(); else start_recording();
         }
         if (kvk == g_macro_hk_stop_vk) {
-            if (s_macro_playing) stop_playback();
+            macro_handle_play_hotkey(-1);
             if (g_macro_recording) stop_recording();
         }
         for (int mi = 0; mi < g_macro_slot_count; mi++) {
@@ -1287,9 +1275,6 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 g_macro_slots[s_current_slot].enabled = en;
                 if (s_edit) SendMessageW(s_edit, EM_SETREADONLY, en ? TRUE : FALSE, 0);
-                UnregisterHotKey(s_macro_hwnd, ID_HK_MACRO_BASE + s_current_slot);
-                if (en && g_macro_slots[s_current_slot].hk_play_vk > 0)
-                    RegisterHotKey(s_macro_hwnd, ID_HK_MACRO_BASE + s_current_slot, 0, g_macro_slots[s_current_slot].hk_play_vk);
             }
             save_config(); break;
         case IDC_M_CHK_INFINITE:
@@ -1400,48 +1385,56 @@ BOOL macro_is_mouse_vk(int vk) {
 HWND macro_get_hwnd(void) { return s_macro_hwnd; }
 
 void macro_register_play_hotkeys(HWND hwnd) {
-    for (int i = 0; i < g_macro_slot_count; i++) {
-        int vk = g_macro_slots[i].hk_play_vk;
-        if (vk > 0 && g_macro_slots[i].enabled && !macro_is_mouse_vk(vk))
-            RegisterHotKey(hwnd, ID_HK_MACRO_BASE + i, 0, vk);
-    }
-    if (g_macro_hk_stop_vk > 0 && !macro_is_mouse_vk(g_macro_hk_stop_vk))
-        RegisterHotKey(hwnd, ID_HK_MACRO_BASE + MAX_MACRO_SLOTS, 0, g_macro_hk_stop_vk);
+    (void)hwnd;
+    /* 主界面不再注册宏键盘热键，避免吞掉原始按键输入。
+       键盘宏热键触发统一走 main.c 的 Interception 拦截路径。 */
 }
 
 void macro_unregister_play_hotkeys(HWND hwnd) {
-    for (int i = 0; i <= MAX_MACRO_SLOTS; i++)
-        UnregisterHotKey(hwnd, ID_HK_MACRO_BASE + i);
+    (void)hwnd;
 }
 
 void macro_handle_play_hotkey(int slot_index) {
-    if (slot_index < 0) { stop_playback(); return; }
-    if (slot_index >= g_macro_slot_count) return;
-    if (!g_macro_slots[slot_index].enabled) return;
-    if (s_macro_hwnd && s_edit && slot_index == s_current_slot)
-        save_current_slot_text();
-    if (g_macro_press_mode) {
-        if (s_macro_playing && s_playing_slot == slot_index) return;
-        if (s_macro_playing) stop_playback();
-        start_playback_slot(slot_index);
-        s_press_poll_vk = g_macro_slots[slot_index].hk_play_vk;
-        HWND timer_hwnd = s_macro_hwnd ? s_macro_hwnd : g_hwnd;
-        SetTimer(timer_hwnd, IDT_MACRO_PRESS_POLL, 10, NULL);
+    BOOL was_playing = s_macro_playing;
+    if (slot_index < 0) {
+        stop_playback();
+    } else if (slot_index >= g_macro_slot_count) {
+        /* invalid slot */
+    } else if (!g_macro_slots[slot_index].enabled) {
+        /* disabled slot */
     } else {
-        if (s_macro_playing) {
-            if (s_playing_slot == slot_index) { stop_playback(); return; }
-            stop_playback();
+        if (s_macro_hwnd && s_edit && slot_index == s_current_slot)
+            save_current_slot_text();
+        if (g_macro_press_mode) {
+            if (!(s_macro_playing && s_playing_slot == slot_index)) {
+                if (s_macro_playing) stop_playback();
+                start_playback_slot(slot_index, TRUE);
+                s_press_poll_vk = g_macro_slots[slot_index].hk_play_vk;
+                HWND timer_hwnd = s_macro_hwnd ? s_macro_hwnd : g_hwnd;
+                SetTimer(timer_hwnd, IDT_MACRO_PRESS_POLL, 10, NULL);
+            }
+        } else {
+            if (s_macro_playing) {
+                if (s_playing_slot == slot_index) stop_playback();
+                else {
+                    stop_playback();
+                    start_playback_slot(slot_index, FALSE);
+                }
+            } else {
+                start_playback_slot(slot_index, FALSE);
+            }
         }
-        start_playback_slot(slot_index);
     }
+    if (!g_macro_press_mode && was_playing != s_macro_playing && g_hwnd)
+        PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)(s_macro_playing ? TRUE : FALSE), 0);
 }
 
 void macro_check_press_release(void) {
     if (s_press_poll_vk > 0 && !(GetAsyncKeyState(s_press_poll_vk) & 0x8000)) {
-        s_macro_playing = FALSE;
         s_press_poll_vk = 0;
         if (s_macro_hwnd) KillTimer(s_macro_hwnd, IDT_MACRO_PRESS_POLL);
         KillTimer(g_hwnd, IDT_MACRO_PRESS_POLL);
+        /* 按压模式松开时静默停止：不触发开/关音效消息 */
         stop_playback();
     }
 }
