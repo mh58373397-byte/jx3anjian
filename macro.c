@@ -85,7 +85,8 @@ extern PFN_get_hardware_id   pfn_get_hardware_id;
 enum {
     MC_KEY_DOWN, MC_KEY_UP, MC_DELAY,
     MC_MOUSE_MOVE, MC_MOUSE_LDOWN, MC_MOUSE_LUP,
-    MC_MOUSE_RDOWN, MC_MOUSE_RUP, MC_MOUSE_MDOWN, MC_MOUSE_MUP
+    MC_MOUSE_RDOWN, MC_MOUSE_RUP, MC_MOUSE_MDOWN, MC_MOUSE_MUP,
+    MC_MOUSE_X1DOWN, MC_MOUSE_X1UP, MC_MOUSE_X2DOWN, MC_MOUSE_X2UP
 };
 
 typedef struct {
@@ -311,6 +312,10 @@ update_desc:;
         else if (evt->mouse_state & INTERCEPTION_MOUSE_RIGHT_BUTTON_UP)    lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u53F3\u952E\u5F39\u8D77");
         else if (evt->mouse_state & INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN) lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4E2D\u952E\u6309\u4E0B");
         else if (evt->mouse_state & INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP)   lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4E2D\u952E\u5F39\u8D77");
+        else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_4_DOWN)      lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E1\u6309\u4E0B");
+        else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_4_UP)        lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77");
+        else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B");
+        else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_5_UP)        lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77");
         break;
     }
 }
@@ -360,6 +365,10 @@ static void build_script_from_recording(void) {
             if (st & INTERCEPTION_MOUSE_RIGHT_BUTTON_UP)    SAPP0(L"\u9F20\u6807\u53F3\u952E\u5F39\u8D77\r\n");
             if (st & INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN) { SAPP(L"\u9F20\u6807\u79FB\u52A8\u5230:%d,%d\r\n", mx, my); SAPP0(L"\u9F20\u6807\u4E2D\u952E\u6309\u4E0B\r\n"); }
             if (st & INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP)   SAPP0(L"\u9F20\u6807\u4E2D\u952E\u5F39\u8D77\r\n");
+            if (st & INTERCEPTION_MOUSE_BUTTON_4_DOWN)      { SAPP(L"\u9F20\u6807\u79FB\u52A8\u5230:%d,%d\r\n", mx, my); SAPP0(L"\u9F20\u6807\u4FA7\u952E1\u6309\u4E0B\r\n"); }
+            if (st & INTERCEPTION_MOUSE_BUTTON_4_UP)        SAPP0(L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77\r\n");
+            if (st & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      { SAPP(L"\u9F20\u6807\u79FB\u52A8\u5230:%d,%d\r\n", mx, my); SAPP0(L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B\r\n"); }
+            if (st & INTERCEPTION_MOUSE_BUTTON_5_UP)        SAPP0(L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77\r\n");
             break;
         }
         }
@@ -459,6 +468,10 @@ static int parse_script(const WCHAR *text, MacroStep *cmds, int max_cmds) {
           else if (wcscmp(line, L"\u9F20\u6807\u53F3\u952E\u5F33\u8D77") == 0 || wcscmp(line, L"\u9F20\u6807\u53F3\u952E\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_RUP; cmds[count++] = s; }
           else if (wcscmp(line, L"\u9F20\u6807\u4E2D\u952E\u6309\u4E0B") == 0) { s.cmd = MC_MOUSE_MDOWN; cmds[count++] = s; }
           else if (wcscmp(line, L"\u9F20\u6807\u4E2D\u952E\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_MUP; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E1\u6309\u4E0B") == 0 || wcscmp(line, L"\u9F20\u6807X1\u6309\u4E0B") == 0) { s.cmd = MC_MOUSE_X1DOWN; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77") == 0 || wcscmp(line, L"\u9F20\u6807X1\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_X1UP; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B") == 0 || wcscmp(line, L"\u9F20\u6807X2\u6309\u4E0B") == 0) { s.cmd = MC_MOUSE_X2DOWN; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77") == 0 || wcscmp(line, L"\u9F20\u6807X2\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_X2UP; cmds[count++] = s; }
     }
     return count;
 }
@@ -540,6 +553,10 @@ static DWORD WINAPI play_thread_proc(LPVOID p) {
             case MC_MOUSE_RUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
             case MC_MOUSE_MDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
             case MC_MOUSE_MUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
+            case MC_MOUSE_X1DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
+            case MC_MOUSE_X1UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
+            case MC_MOUSE_X2DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
+            case MC_MOUSE_X2UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
             }
         }
         Sleep(1);
@@ -769,7 +786,8 @@ static void apply_set_hotkey(int vk) {
 }
 
 static LRESULT CALLBACK macro_kb_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION && s_macro_setting_hk && wParam == WM_KEYDOWN) {
+    if (nCode == HC_ACTION && s_macro_setting_hk &&
+        (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
         KBDLLHOOKSTRUCT *p = (KBDLLHOOKSTRUCT *)lParam;
         int vk = (int)p->vkCode;
         if (vk == VK_ESCAPE) {

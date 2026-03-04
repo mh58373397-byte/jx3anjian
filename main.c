@@ -140,9 +140,16 @@ static BOOL load_interception_dll(void) {
 #define IDC_CHK_SWAP  129
 #define IDC_CHK_SWAP_NOSTART 130
 #define IDC_EDIT_DELAY 131
+#define IDC_CHK_CURWIN_ONLY 132
+#define IDC_CHK_SKILL_FLICKER 133
+#define IDC_COMBO_CONFIG 134
+#define IDC_BTN_NEW_CONFIG 135
+#define IDC_BTN_RENAME_CONFIG 136
+#define IDC_EDIT_CONFIG_NAME 137
 #define IDM_GM_TOGGLE      200
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
+#define IDM_GM_GAIYI       203
 #define WM_PLAY_TOGGLE_SOUND (WM_APP + 10)
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
@@ -211,9 +218,21 @@ static BOOL  g_macro_no_start = FALSE;
 static BOOL  g_sound_enabled = TRUE;
 static BOOL  g_swap_enabled    = FALSE;
 static BOOL  g_swap_no_start  = FALSE;
+static BOOL  g_curwin_only    = FALSE;
+static BOOL  g_skill_flicker  = FALSE;
+static WCHAR g_cfg_name[MAX_PATH] = L"config.json";
 static int   g_key_swap[256];
 static BOOL  g_sound_open_ready = FALSE;
 static BOOL  g_sound_close_ready = FALSE;
+static BOOL  g_scope_paused = FALSE;
+static HWND  g_scope_target_root = NULL;
+static DWORD g_game_fx_start_tick = 0;
+static DWORD g_game_banner_until_tick = 0;
+static WCHAR g_game_banner_text[64] = L"";
+static int   g_gaiyi_value = 30; /* 0=特效最强, 100=特效最弱 */
+static HWND  g_gaiyi_wnd = NULL;
+static HWND  g_gaiyi_slider = NULL;
+static HWND  g_gaiyi_label = NULL;
 
 static int   g_drag_src_idx = -1;
 static int   g_drag_dst_idx = -1;
@@ -225,13 +244,21 @@ static HWND g_edit_delay;
 static HWND g_radio_hold, g_radio_toggle, g_radio_hybrid;
 static HWND g_chk_keylock, g_chk_turbo, g_chk_pause_hold, g_chk_macro_active, g_chk_macro_nostart;
 static HWND g_chk_swap, g_chk_swap_nostart;
+static HWND g_chk_curwin_only;
+static HWND g_chk_skill_flicker;
+static HWND g_combo_config;
+static HWND g_btn_new_config;
+static HWND g_btn_rename_config;
+static HWND g_edit_config_name;
 static HWND g_btn_sound;
 
 static int     g_repeat_btn   = 0;
 static int     g_repeat_count = 0;
 static WNDPROC g_orig_btn_proc = NULL;
 static WNDPROC g_orig_delay_edit_proc = NULL;
+static WNDPROC g_orig_cfg_edit_proc = NULL;
 static BOOL    g_delay_editing = FALSE;
+static BOOL    g_cfg_renaming = FALSE;
 
 static HFONT  g_font_kb      = NULL;
 static HFONT  g_font_legend  = NULL;
@@ -470,10 +497,55 @@ static void get_exe_dir(WCHAR *buf, int buflen) {
     if (p) *(p + 1) = 0;
 }
 
+static BOOL is_valid_cfg_name(const WCHAR *name) {
+    int len;
+    if (!name || !name[0]) return FALSE;
+    if (wcschr(name, L'\\') || wcschr(name, L'/') || wcschr(name, L':')) return FALSE;
+    len = lstrlenW(name);
+    if (len < 6) return FALSE;
+    return (lstrcmpiW(name + len - 5, L".json") == 0);
+}
+
+static void build_cfg_path(WCHAR *path, int buflen) {
+    get_exe_dir(path, buflen);
+    lstrcatW(path, g_cfg_name);
+}
+
+static void refresh_cfg_combo(void) {
+    WCHAR dir[MAX_PATH], pattern[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind;
+    int sel_idx = -1;
+    BOOL has_current = FALSE;
+    if (!g_combo_config) return;
+    SendMessageW(g_combo_config, CB_RESETCONTENT, 0, 0);
+    get_exe_dir(dir, MAX_PATH);
+    lstrcpynW(pattern, dir, MAX_PATH);
+    lstrcatW(pattern, L"*.json");
+    hFind = FindFirstFileW(pattern, &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            if (!is_valid_cfg_name(fd.cFileName)) continue;
+            {
+                int idx = (int)SendMessageW(g_combo_config, CB_ADDSTRING, 0, (LPARAM)fd.cFileName);
+                if (lstrcmpiW(fd.cFileName, g_cfg_name) == 0) {
+                    sel_idx = idx;
+                    has_current = TRUE;
+                }
+            }
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+    if (!has_current) {
+        sel_idx = (int)SendMessageW(g_combo_config, CB_ADDSTRING, 0, (LPARAM)g_cfg_name);
+    }
+    if (sel_idx >= 0) SendMessageW(g_combo_config, CB_SETCURSEL, (WPARAM)sel_idx, 0);
+}
+
 void save_config(void) {
     WCHAR path[MAX_PATH];
-    get_exe_dir(path, MAX_PATH);
-    lstrcatW(path, L"config.json");
+    build_cfg_path(path, MAX_PATH);
     int bufsize = 524288;
     char *buf = (char*)malloc(bufsize);
     if (!buf) return;
@@ -490,8 +562,9 @@ void save_config(void) {
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
     SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
-    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n",
-         g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0);
+    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n  \"curwin_only\": %d,\n  \"skill_flicker\": %d,\n",
+         g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0, g_curwin_only ? 1 : 0, g_skill_flicker ? 1 : 0);
+    SCFG("  \"gaiyi\": %d,\n", g_gaiyi_value);
     SCFG("  \"key_swaps\": [%s", "");
     {
         int sfirst = 1;
@@ -527,9 +600,47 @@ static void parse_int_array(const char *start, BOOL *arr, int arrlen) {
 }
 
 static void load_config(void) {
-    WCHAR path[MAX_PATH]; get_exe_dir(path, MAX_PATH); lstrcatW(path, L"config.json");
+    WCHAR path[MAX_PATH]; build_cfg_path(path, MAX_PATH);
     HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) { save_config(); return; }
+    if (hFile == INVALID_HANDLE_VALUE) {
+        if (lstrcmpiW(g_cfg_name, L"config.json") == 0) {
+            WCHAR src_name[MAX_PATH] = L"";
+            WCHAR src_path[MAX_PATH], dst_path[MAX_PATH];
+            if (g_combo_config) {
+                int idx = (int)SendMessageW(g_combo_config, CB_GETCURSEL, 0, 0);
+                if (idx != CB_ERR)
+                    SendMessageW(g_combo_config, CB_GETLBTEXT, (WPARAM)idx, (LPARAM)src_name);
+            }
+            if (!is_valid_cfg_name(src_name) || lstrcmpiW(src_name, L"config.json") == 0) {
+                WCHAR dir[MAX_PATH], patt[MAX_PATH];
+                WIN32_FIND_DATAW fd;
+                HANDLE hf;
+                get_exe_dir(dir, MAX_PATH);
+                lstrcpynW(patt, dir, MAX_PATH);
+                lstrcatW(patt, L"*.json");
+                hf = FindFirstFileW(patt, &fd);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                        if (!is_valid_cfg_name(fd.cFileName)) continue;
+                        if (lstrcmpiW(fd.cFileName, L"config.json") != 0) {
+                            lstrcpynW(src_name, fd.cFileName, MAX_PATH);
+                            break;
+                        }
+                    } while (FindNextFileW(hf, &fd));
+                    FindClose(hf);
+                }
+            }
+            if (is_valid_cfg_name(src_name) && lstrcmpiW(src_name, L"config.json") != 0) {
+                get_exe_dir(src_path, MAX_PATH); lstrcatW(src_path, src_name);
+                get_exe_dir(dst_path, MAX_PATH); lstrcatW(dst_path, L"config.json");
+                if (CopyFileW(src_path, dst_path, FALSE)) {
+                    hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+                }
+            }
+        }
+        if (hFile == INVALID_HANDLE_VALUE) { save_config(); return; }
+    }
     DWORD fileSize = GetFileSize(hFile, NULL);
     if (fileSize == 0 || fileSize > 10*1024*1024) { CloseHandle(hFile); return; }
     char *buf = (char*)malloc(fileSize + 1);
@@ -562,6 +673,11 @@ static void load_config(void) {
     p = strstr(buf, "\"sound_enabled\""); if (p) { p = strchr(p, ':'); if (p) g_sound_enabled = (atoi(p+1) != 0); }
     p = strstr(buf, "\"swap_enabled\""); if (p) { p = strchr(p, ':'); if (p) g_swap_enabled = (atoi(p+1) != 0); }
     p = strstr(buf, "\"swap_no_start\""); if (p) { p = strchr(p, ':'); if (p) g_swap_no_start = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"curwin_only\""); if (p) { p = strchr(p, ':'); if (p) g_curwin_only = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"skill_flicker\""); if (p) { p = strchr(p, ':'); if (p) g_skill_flicker = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"gaiyi\""); if (p) { p = strchr(p, ':'); if (p) g_gaiyi_value = atoi(p+1); }
+    if (g_gaiyi_value < 0) g_gaiyi_value = 0;
+    if (g_gaiyi_value > 100) g_gaiyi_value = 100;
     p = strstr(buf, "\"key_swaps\"");
     if (p) {
         memset(g_key_swap, 0, sizeof(g_key_swap));
@@ -1368,6 +1484,7 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             BOOL is_toggled_on = local_toggled[i];
             BOOL is_held_on = local_held[i];
             BOOL is_on;
+            BOOL use_flicker_order;
             InterceptionDevice idev;
             if (mode==MODE_HYBRID) is_on = is_toggled_on || (is_held_on && !is_toggled_on);
             else if (mode==MODE_HOLD) is_on = is_held_on;
@@ -1379,14 +1496,27 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             else if (mode==MODE_HOLD) idev = local_hdev[i];
             else idev = local_tdev[i];
             if (!idev) continue;
+            use_flicker_order = g_skill_flicker;
             any_sent = TRUE;
             if (local_slots[i].is_mouse) {
-                mbatch[0].state = local_slots[i].mouse_dn;
-                mbatch[1].state = local_slots[i].mouse_up;
+                if (use_flicker_order) {
+                    mbatch[0].state = local_slots[i].mouse_up;
+                    mbatch[1].state = local_slots[i].mouse_dn;
+                } else {
+                    mbatch[0].state = local_slots[i].mouse_dn;
+                    mbatch[1].state = local_slots[i].mouse_up;
+                }
                 interception_send(g_ctx, idev, (InterceptionStroke*)mbatch, 2);
             } else {
-                ibatch[0].code = local_slots[i].scan; ibatch[0].state = local_slots[i].flags_dn;
-                ibatch[1].code = local_slots[i].scan; ibatch[1].state = local_slots[i].flags_up;
+                ibatch[0].code = local_slots[i].scan;
+                ibatch[1].code = local_slots[i].scan;
+                if (use_flicker_order) {
+                    ibatch[0].state = local_slots[i].flags_up;
+                    ibatch[1].state = local_slots[i].flags_dn;
+                } else {
+                    ibatch[0].state = local_slots[i].flags_dn;
+                    ibatch[1].state = local_slots[i].flags_up;
+                }
                 interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2);
             }
             local_count++;
@@ -1489,6 +1619,54 @@ static void update_sound_btn(void) {
 
 static DWORD g_last_toggle_tick = 0;
 
+static HWND get_scope_root(HWND hwnd) {
+    if (!hwnd) return NULL;
+    {
+        HWND root = GetAncestor(hwnd, GA_ROOT);
+        return root ? root : hwnd;
+    }
+}
+
+static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
+    if (on) {
+        if (g_active) return;
+        if (!g_key_lock && reset_state) release_toggled();
+        g_active = TRUE;
+        g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
+        if (with_sound) play_toggle_sound(TRUE);
+    } else {
+        if (!g_active) return;
+        g_active = FALSE;
+        if (g_rthread) { WaitForSingleObject(g_rthread,500); CloseHandle(g_rthread); g_rthread=NULL; }
+        if (reset_state) {
+            if (g_key_lock) send_toggled_keyups();
+            else release_toggled();
+        }
+        if (with_sound) play_toggle_sound(FALSE);
+    }
+}
+
+static void evaluate_window_scope(void) {
+    BOOL logical_on = (g_active || g_scope_paused);
+    if (!g_curwin_only || !logical_on || !g_scope_target_root) return;
+
+    {
+        HWND fg_root = get_scope_root(GetForegroundWindow());
+        BOOL in_scope = (fg_root == g_scope_target_root);
+        if (!in_scope) {
+            if (g_active) {
+                set_active_state(FALSE, FALSE, FALSE);
+                g_scope_paused = TRUE;
+                InvalidateRect(g_hwnd, NULL, TRUE);
+            }
+        } else if (g_scope_paused) {
+            g_scope_paused = FALSE;
+            set_active_state(TRUE, FALSE, FALSE);
+            InvalidateRect(g_hwnd, NULL, TRUE);
+        }
+    }
+}
+
 static void toggle_active(void) {
     DWORD now = GetTickCount();
     if (now - g_last_toggle_tick < TOGGLE_DEBOUNCE_MS) return;
@@ -1497,19 +1675,18 @@ static void toggle_active(void) {
         MessageBoxW(g_hwnd, L"Interception \x9A71\x52A8\x672A\x5C31\x7EEA\xFF01", L"\x9519\x8BEF", MB_ICONERROR);
         return;
     }
-    if (g_active) {
-        g_active = FALSE;
-        if (g_rthread) { WaitForSingleObject(g_rthread,500); CloseHandle(g_rthread); g_rthread=NULL; }
-        if (g_key_lock)
-            send_toggled_keyups();
-        else
-            release_toggled();
-        play_toggle_sound(FALSE);
+    if (g_active || g_scope_paused) {
+        g_scope_paused = FALSE;
+        g_scope_target_root = NULL;
+        set_active_state(FALSE, TRUE, TRUE);
     } else {
-        if (!g_key_lock) release_toggled();
-        g_active = TRUE;
-        g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
-        play_toggle_sound(TRUE);
+        if (g_curwin_only) {
+            g_scope_target_root = get_scope_root(GetForegroundWindow());
+            if (!g_scope_target_root) g_scope_target_root = get_scope_root(g_hwnd);
+        } else {
+            g_scope_target_root = NULL;
+        }
+        set_active_state(TRUE, TRUE, TRUE);
     }
     InvalidateRect(g_hwnd, NULL, TRUE);
 }
@@ -1518,9 +1695,29 @@ static BOOL CALLBACK show_child_proc(HWND child, LPARAM lp) {
     ShowWindow(child, (int)lp); return TRUE;
 }
 
+static void update_ui_labels(void);
+
+static void restore_main_ui_visibility(void) {
+    if (g_combo_config && g_edit_config_name) {
+        ShowWindow(g_combo_config, g_cfg_renaming ? SW_HIDE : SW_SHOW);
+        ShowWindow(g_edit_config_name, g_cfg_renaming ? SW_SHOW : SW_HIDE);
+    }
+    if (g_btn_rename_config) {
+        SetWindowTextW(g_btn_rename_config, g_cfg_renaming ? L"ok" : L"\x6539");
+    }
+    if (g_lbl_delay && g_edit_delay) {
+        ShowWindow(g_lbl_delay, g_delay_editing ? SW_HIDE : SW_SHOW);
+        ShowWindow(g_edit_delay, g_delay_editing ? SW_SHOW : SW_HIDE);
+    }
+}
+
 static void toggle_game_mode(HWND hwnd) {
+    DWORD now = GetTickCount();
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
     g_game_mode = !g_game_mode;
+    g_game_fx_start_tick = now;
+    g_game_banner_until_tick = 0;
+    g_game_banner_text[0] = 0;
     if (g_game_mode) {
         GetWindowRect(hwnd, &g_normal_rect);
         EnumChildWindows(hwnd, show_child_proc, SW_HIDE);
@@ -1539,6 +1736,11 @@ static void toggle_game_mode(HWND hwnd) {
         int w=g_normal_rect.right-g_normal_rect.left, h=g_normal_rect.bottom-g_normal_rect.top;
         SetWindowPos(hwnd, HWND_NOTOPMOST, g_normal_rect.left, g_normal_rect.top, w, h, SWP_FRAMECHANGED);
         EnumChildWindows(hwnd, show_child_proc, SW_SHOW);
+        restore_main_ui_visibility();
+        refresh_cfg_combo();
+        update_ui_labels();
+        InvalidateRect(hwnd, NULL, TRUE);
+        UpdateWindow(hwnd);
     }
     InvalidateRect(hwnd, NULL, TRUE);
 }
@@ -1716,6 +1918,8 @@ static void update_ui_labels(void) {
 
     if (g_active)
         set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x2705 \x5DF2\x5F00\x542F");
+    else if (g_scope_paused)
+        set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x5DF2\x5F00\x542F (\x7A97\x53E3\x5916\x6682\x505C)");
     else
         set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x5DF2\x5173\x95ED");
 
@@ -1746,6 +1950,111 @@ static void update_ui_labels(void) {
         else lstrcpyW(t, L"\x8FDE\x53D1\x4E2D:  --");
     } else lstrcpyW(t, L"\x8FDE\x53D1\x4E2D:  --");
     set_label_if_changed(g_lbl_repeat, t);
+}
+
+static void sync_ui_from_loaded_config(HWND hwnd) {
+    HWND sel = (g_mode==MODE_HOLD) ? g_radio_hold : (g_mode==MODE_CUSTOM) ? g_radio_toggle : g_radio_hybrid;
+    SendMessageW(g_radio_hold, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(g_radio_toggle, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(g_radio_hybrid, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(sel, BM_SETCHECK, BST_CHECKED, 0);
+    SendMessageW(g_chk_keylock, BM_SETCHECK, g_key_lock ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_turbo, BM_SETCHECK, g_turbo ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_pause_hold, BM_SETCHECK, g_pause_toggle_on_hold ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_macro_active, BM_SETCHECK, g_macro_active ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_macro_nostart, BM_SETCHECK, g_macro_no_start ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_swap, BM_SETCHECK, g_swap_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_swap_nostart, BM_SETCHECK, g_swap_no_start ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_curwin_only, BM_SETCHECK, g_curwin_only ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_chk_skill_flicker, BM_SETCHECK, g_skill_flicker ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(g_chk_pause_hold, g_mode == MODE_HYBRID);
+    EnableWindow(g_chk_macro_nostart, g_macro_active);
+    EnableWindow(g_chk_swap_nostart, g_swap_enabled);
+    update_delay_edit_enabled();
+    update_hotkey_labels();
+    update_sound_btn();
+    apply_hotkey_registration(hwnd);
+    macro_unregister_play_hotkeys(hwnd);
+    if (g_macro_active) macro_register_play_hotkeys(hwnd);
+    update_ui_labels();
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
+static BOOL switch_config_file(HWND hwnd, const WCHAR *cfg_name, BOOL create_if_missing) {
+    WCHAR path[MAX_PATH];
+    if (!is_valid_cfg_name(cfg_name)) return FALSE;
+    lstrcpynW(g_cfg_name, cfg_name, MAX_PATH);
+    build_cfg_path(path, MAX_PATH);
+    if (create_if_missing) {
+        HANDLE hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (hf == INVALID_HANDLE_VALUE) save_config();
+        else CloseHandle(hf);
+    }
+    load_config();
+    refresh_cfg_combo();
+    sync_ui_from_loaded_config(hwnd);
+    return TRUE;
+}
+
+static void begin_config_rename(void) {
+    WCHAR base[MAX_PATH];
+    int len = lstrlenW(g_cfg_name);
+    if (!g_combo_config || !g_edit_config_name || !g_btn_rename_config) return;
+    lstrcpynW(base, g_cfg_name, MAX_PATH);
+    if (len > 5 && lstrcmpiW(g_cfg_name + len - 5, L".json") == 0)
+        base[len - 5] = 0;
+    SetWindowTextW(g_edit_config_name, base);
+    ShowWindow(g_combo_config, SW_HIDE);
+    ShowWindow(g_edit_config_name, SW_SHOW);
+    SetWindowTextW(g_btn_rename_config, L"ok");
+    SetFocus(g_edit_config_name);
+    SendMessageW(g_edit_config_name, EM_SETSEL, 0, -1);
+    g_cfg_renaming = TRUE;
+}
+
+static void end_config_rename(HWND hwnd, BOOL apply) {
+    if (!g_cfg_renaming) return;
+    if (apply) {
+        WCHAR base[MAX_PATH], new_name[MAX_PATH], src_path[MAX_PATH], dst_path[MAX_PATH];
+        int i, blen;
+        GetWindowTextW(g_edit_config_name, base, MAX_PATH);
+        blen = lstrlenW(base);
+        while (blen > 0 && (base[blen-1] == L' ' || base[blen-1] == L'\t')) base[--blen] = 0;
+        i = 0;
+        while (base[i] == L' ' || base[i] == L'\t') i++;
+        if (i > 0) MoveMemory(base, base + i, (lstrlenW(base + i) + 1) * sizeof(WCHAR));
+        if (!base[0] || wcschr(base, L'.') || wcschr(base, L'\\') || wcschr(base, L'/') || wcschr(base, L':')) {
+            MessageBoxW(hwnd, L"\x6587\x4EF6\x540D\x65E0\x6548\xFF0C\x8BF7\x53EA\x8F93\x5165\x6587\x4EF6\x540D\xFF08\x4E0D\x5305\x542B\x540E\x7F00\xFF09\x3002",
+                L"\x63D0\x793A", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        wsprintfW(new_name, L"%s.json", base);
+        if (lstrcmpiW(new_name, g_cfg_name) != 0) {
+            build_cfg_path(src_path, MAX_PATH);
+            get_exe_dir(dst_path, MAX_PATH);
+            lstrcatW(dst_path, new_name);
+            {
+                HANDLE hf = CreateFileW(dst_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    CloseHandle(hf);
+                    MessageBoxW(hwnd, L"\x76EE\x6807\x6587\x4EF6\x540D\x5DF2\x5B58\x5728\x3002",
+                        L"\x63D0\x793A", MB_OK | MB_ICONWARNING);
+                    return;
+                }
+            }
+            if (!MoveFileW(src_path, dst_path)) {
+                MessageBoxW(hwnd, L"\x91CD\x547D\x540D\x5931\x8D25\x3002",
+                    L"\x9519\x8BEF", MB_OK | MB_ICONERROR);
+                return;
+            }
+            lstrcpynW(g_cfg_name, new_name, MAX_PATH);
+            refresh_cfg_combo();
+        }
+    }
+    ShowWindow(g_edit_config_name, SW_HIDE);
+    ShowWindow(g_combo_config, SW_SHOW);
+    SetWindowTextW(g_btn_rename_config, L"\x6539");
+    g_cfg_renaming = FALSE;
 }
 
 /* ================================================================== */
@@ -1817,6 +2126,101 @@ static LRESULT CALLBACK delay_edit_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         }
     }
     return CallWindowProcW(g_orig_delay_edit_proc, hwnd, msg, wp, lp);
+}
+
+static LRESULT CALLBACK cfg_name_edit_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_RETURN) {
+            if (g_cfg_renaming) end_config_rename(g_hwnd, TRUE);
+            return 0;
+        }
+        if (wp == VK_ESCAPE) {
+            if (g_cfg_renaming) end_config_rename(g_hwnd, FALSE);
+            return 0;
+        }
+    }
+    return CallWindowProcW(g_orig_cfg_edit_proc, hwnd, msg, wp, lp);
+}
+
+static int tri_wave(DWORD tick, int period, int minv, int maxv) {
+    int t, half, span;
+    if (period < 2) period = 2;
+    if (maxv < minv) return minv;
+    t = (int)(tick % (DWORD)period);
+    half = period / 2;
+    span = maxv - minv;
+    if (t < half) return minv + (span * t) / (half ? half : 1);
+    return maxv - (span * (t - half)) / (half ? half : 1);
+}
+
+static void glow_text_out(HDC hdc, int x, int y, const WCHAR *text, COLORREF core, COLORREF glow) {
+    SetTextColor(hdc, glow); TextOutW(hdc, x-1, y, text, lstrlenW(text));
+    SetTextColor(hdc, glow); TextOutW(hdc, x+1, y, text, lstrlenW(text));
+    SetTextColor(hdc, glow); TextOutW(hdc, x, y-1, text, lstrlenW(text));
+    SetTextColor(hdc, glow); TextOutW(hdc, x, y+1, text, lstrlenW(text));
+    SetTextColor(hdc, core); TextOutW(hdc, x, y, text, lstrlenW(text));
+}
+
+static LRESULT CALLBACK gaiyi_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        HFONT hf = g_font_ui;
+        WCHAR txt[64];
+        wsprintfW(txt, L"\x4E10\x610F\x503C:%d%%", g_gaiyi_value);
+        g_gaiyi_label = CreateWindowW(L"STATIC", txt,
+            WS_CHILD|WS_VISIBLE, 8, 8, 186, 18, hwnd, NULL, NULL, NULL);
+        SendMessageW(g_gaiyi_label, WM_SETFONT, (WPARAM)hf, TRUE);
+        g_gaiyi_slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
+            WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_AUTOTICKS, 10, 30, 180, 32,
+            hwnd, (HMENU)(INT_PTR)1, NULL, NULL);
+        SendMessageW(g_gaiyi_slider, TBM_SETRANGEMIN, FALSE, 0);
+        SendMessageW(g_gaiyi_slider, TBM_SETRANGEMAX, FALSE, 100);
+        SendMessageW(g_gaiyi_slider, TBM_SETPOS, TRUE, g_gaiyi_value);
+        return 0;
+    }
+    case WM_HSCROLL:
+        if ((HWND)lp == g_gaiyi_slider) {
+            WCHAR txt[64];
+            g_gaiyi_value = (int)SendMessageW(g_gaiyi_slider, TBM_GETPOS, 0, 0);
+            if (g_gaiyi_value < 0) g_gaiyi_value = 0;
+            if (g_gaiyi_value > 100) g_gaiyi_value = 100;
+            wsprintfW(txt, L"\x4E10\x610F\x503C:%d%%", g_gaiyi_value);
+            if (g_gaiyi_label) SetWindowTextW(g_gaiyi_label, txt);
+            save_config();
+            InvalidateRect(g_hwnd, NULL, FALSE);
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_gaiyi_label = NULL;
+        g_gaiyi_slider = NULL;
+        g_gaiyi_wnd = NULL;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void show_gaiyi_popup(HWND owner) {
+    WNDCLASSW wc = {0};
+    POINT pt;
+    if (g_gaiyi_wnd) {
+        SetForegroundWindow(g_gaiyi_wnd);
+        return;
+    }
+    wc.lpfnWndProc = gaiyi_wndproc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"GaiyiPopupClass";
+    RegisterClassW(&wc);
+    GetCursorPos(&pt);
+    g_gaiyi_wnd = CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_TOPMOST, L"GaiyiPopupClass",
+        L"\x4E10\x610F\x503C\x8C03\x8282", WS_POPUP|WS_CAPTION|WS_SYSMENU,
+        pt.x, pt.y, 205, 95, owner, NULL, GetModuleHandleW(NULL), NULL);
+    ShowWindow(g_gaiyi_wnd, SW_SHOW);
+    UpdateWindow(g_gaiyi_wnd);
 }
 
 /* ================================================================== */
@@ -1943,25 +2347,55 @@ static void paint(HWND hwnd) {
     HDC hdc = g_paint_memdc;
 
     if (g_game_mode) {
-        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        DWORD tick = GetTickCount() - g_game_fx_start_tick;
+        int fx = 100 - g_gaiyi_value; /* 0=弱, 100=强 */
+        int pulse = tri_wave(tick, 1000, 40, 60 + fx * 2);
+        int border = tri_wave(tick, 800, 70, 90 + (fx * 165) / 100);
+        int bar_pulse = tri_wave(tick, 420, 100, 120 + (fx * 135) / 100);
+        for (int yy = 0; yy < h; yy++) {
+            int r = (8 + ((yy * (10 + fx/4)) / (h ? h : 1)) + (int)((tick / 20) % (8 + fx/3)));
+            int g = (5 + ((yy * (12 + fx/3)) / (h ? h : 1)));
+            int b = (25 + ((yy * (40 + fx)) / (h ? h : 1)) + (int)((tick / 12) % (10 + fx/2)));
+            HBRUSH row = CreateSolidBrush(RGB(r > 255 ? 255 : r, g > 255 ? 255 : g, b > 255 ? 255 : b));
+            RECT rr = {0, yy, w, yy + 1};
+            FillRect(hdc, &rr, row);
+            DeleteObject(row);
+        }
         SetBkMode(hdc, TRANSPARENT);
         HFONT old = (HFONT)SelectObject(hdc, g_font_game);
         WCHAR t[256]; int y=10, lh=22, x=8;
-        if (g_active) { SetTextColor(hdc, RGB(0,255,0)); lstrcpyW(t, L"\x72B6\x6001: ON"); }
-        else { SetTextColor(hdc, RGB(255,60,60)); lstrcpyW(t, L"\x72B6\x6001: OFF"); }
-        TextOutW(hdc, x, y, t, lstrlenW(t)); y+=lh;
-        SetTextColor(hdc, RGB(200,200,200));
+        if (g_active) lstrcpyW(t, L"\x72B6\x6001: ON");
+        else lstrcpyW(t, L"\x72B6\x6001: OFF");
+        glow_text_out(hdc, x, y, t,
+            g_active ? RGB(120 + fx/4, 180 + fx/2, 150 + fx/3) : RGB(200 + fx/2, 110 + fx/5, 110 + fx/5),
+            g_active ? RGB(10, pulse, 40 + fx) : RGB(pulse/2, 20 + fx/8, 20 + fx/8));
+        y+=lh;
         WCHAR keys[256]={0}; int count;
         if (g_active) {
             if (g_mode==MODE_HYBRID) { int c1=build_toggled_list(keys,240,3); if(c1>0&&c1<3){int l=lstrlenW(keys);keys[l]=L',';keys[l+1]=L' ';keys[l+2]=0;} build_active_list(keys+lstrlenW(keys),240-lstrlenW(keys),3); count=lstrlenW(keys)>0?1:0; }
             else { count=(g_mode==MODE_HOLD)?build_active_list(keys,240,5):build_toggled_list(keys,240,5); }
             if(count>0) wsprintfW(t,L"\x8FDE\x53D1: %s",keys); else lstrcpyW(t,L"\x8FDE\x53D1: --"); }
         else lstrcpyW(t, L"\x8FDE\x53D1: --");
-        TextOutW(hdc, x, y, t, lstrlenW(t)); y+=lh;
+        glow_text_out(hdc, x, y, t, RGB(180 + fx/3, 200 + fx/4, 220 + fx/3), RGB(30 + fx/3, 50 + fx/4, pulse));
+        y+=lh;
         LONG pps=g_pps;
-        if (g_active&&pps>0) { SetTextColor(hdc,RGB(0,255,100)); wsprintfW(t,L"\x901F\x5EA6: %ld/s",pps); }
-        else { SetTextColor(hdc,RGB(120,120,120)); lstrcpyW(t,L"\x901F\x5EA6: --"); }
-        TextOutW(hdc, x, y, t, lstrlenW(t));
+        if (g_active&&pps>0) wsprintfW(t,L"\x901F\x5EA6: %ld/s",pps);
+        else lstrcpyW(t,L"\x901F\x5EA6: --");
+        glow_text_out(hdc, x, y, t, RGB(100 + fx/3, 180 + fx/2, 160 + fx/2), RGB(20, bar_pulse, 50 + fx));
+        {
+            HPEN p1 = CreatePen(PS_SOLID, 1, g_active ? RGB(20, border, 120) : RGB(border, 40, 40));
+            HPEN p2 = CreatePen(PS_SOLID, 1, g_active ? RGB(100, 255, 200) : RGB(255, 120, 120));
+            HGDIOBJ old_pen = SelectObject(hdc, p1);
+            HGDIOBJ old_br = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(hdc, 0, 0, w, h);
+            SelectObject(hdc, p2);
+            Rectangle(hdc, 2, 2, w-2, h-2);
+            SelectObject(hdc, old_br);
+            SelectObject(hdc, old_pen);
+            DeleteObject(p1);
+            DeleteObject(p2);
+        }
+        /* 游戏模式切换横幅已移除 */
         SelectObject(hdc, old);
     } else {
         FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
@@ -2005,11 +2439,26 @@ static void create_controls(HWND hwnd) {
         WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+270, y, 90, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP, NULL, NULL);
     SendMessageW(g_chk_swap, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_swap_enabled) SendMessageW(g_chk_swap, BM_SETCHECK, BST_CHECKED, 0);
-    g_chk_swap_nostart = CreateWindowW(L"BUTTON", L"\x4E0D\x5F00\x542F\x8FDE\x53D1\x952E\x4F4D\x8C03\x4E5F\x751F\x6548",
-        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+365, y, 185, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP_NOSTART, NULL, NULL);
+    g_chk_swap_nostart = CreateWindowW(L"BUTTON", L"\x4E0D\x5F00\x542F\x8FDE\x53D1\x952E\x4F4D\x5BF9\x8C03\x4E5F\x751F\x6548",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+355, y, 170, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP_NOSTART, NULL, NULL);
     SendMessageW(g_chk_swap_nostart, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_swap_no_start) SendMessageW(g_chk_swap_nostart, BM_SETCHECK, BST_CHECKED, 0);
     EnableWindow(g_chk_swap_nostart, g_swap_enabled);
+    g_combo_config = CreateWindowW(L"COMBOBOX", NULL,
+        WS_CHILD|WS_VISIBLE|WS_VSCROLL|CBS_DROPDOWNLIST,
+        LP_X+530, y-1, 95, 260, hwnd, (HMENU)(INT_PTR)IDC_COMBO_CONFIG, NULL, NULL);
+    SendMessageW(g_combo_config, WM_SETFONT, (WPARAM)hf, TRUE);
+    g_edit_config_name = CreateWindowW(L"EDIT", L"",
+        WS_CHILD|WS_BORDER|ES_AUTOHSCROLL,
+        LP_X+530, y-1, 95, 22, hwnd, (HMENU)(INT_PTR)IDC_EDIT_CONFIG_NAME, NULL, NULL);
+    SendMessageW(g_edit_config_name, WM_SETFONT, (WPARAM)hf, TRUE);
+    g_orig_cfg_edit_proc = (WNDPROC)SetWindowLongPtrW(g_edit_config_name, GWLP_WNDPROC, (LONG_PTR)cfg_name_edit_proc);
+    ShowWindow(g_edit_config_name, SW_HIDE);
+    g_btn_new_config = make_button(hwnd, IDC_BTN_NEW_CONFIG, L"\x65B0\x5EFA", LP_X+628, y-1, 44, 24);
+    SendMessageW(g_btn_new_config, WM_SETFONT, (WPARAM)hf, TRUE);
+    g_btn_rename_config = make_button(hwnd, IDC_BTN_RENAME_CONFIG, L"\x6539", LP_X+675, y-1, 28, 24);
+    SendMessageW(g_btn_rename_config, WM_SETFONT, (WPARAM)hf, TRUE);
+    refresh_cfg_combo();
     y += 24;
     make_label(hwnd, 0, NULL, LP_X, y, LP_W, 2, SS_ETCHEDHORZ);
     y += 8;
@@ -2075,6 +2524,14 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_chk_macro_nostart, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_macro_no_start) SendMessageW(g_chk_macro_nostart, BM_SETCHECK, BST_CHECKED, 0);
     EnableWindow(g_chk_macro_nostart, g_macro_active);
+    g_chk_curwin_only = CreateWindowW(L"BUTTON", L"\x4EC5\x5728\x5F53\x524D\x7A97\x53E3\x751F\x6548",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+480, y, 160, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_CURWIN_ONLY, NULL, NULL);
+    SendMessageW(g_chk_curwin_only, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_curwin_only) SendMessageW(g_chk_curwin_only, BM_SETCHECK, BST_CHECKED, 0);
+    g_chk_skill_flicker = CreateWindowW(L"BUTTON", L"\x6280\x80FD\x5FEB\x901F\x95EA\x70C1",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+645, y, 95, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SKILL_FLICKER, NULL, NULL);
+    SendMessageW(g_chk_skill_flicker, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_skill_flicker) SendMessageW(g_chk_skill_flicker, BM_SETCHECK, BST_CHECKED, 0);
     y += 24;
 
     g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 105, 18, 0);
@@ -2236,9 +2693,57 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_NCHITTEST:
         if (g_game_mode) {
-            LRESULT hit = DefWindowProcW(hwnd, msg, wp, lp);
-            if (hit == HTCLIENT) return HTCAPTION;
-            return hit;
+            POINT pt = { (int)(short)LOWORD(lp), (int)(short)HIWORD(lp) };
+            RECT rc;
+            int b = 8;
+            GetWindowRect(hwnd, &rc);
+            if (pt.x < rc.left + b && pt.y < rc.top + b) return HTTOPLEFT;
+            if (pt.x > rc.right - b && pt.y < rc.top + b) return HTTOPRIGHT;
+            if (pt.x < rc.left + b && pt.y > rc.bottom - b) return HTBOTTOMLEFT;
+            if (pt.x > rc.right - b && pt.y > rc.bottom - b) return HTBOTTOMRIGHT;
+            if (pt.x < rc.left + b) return HTLEFT;
+            if (pt.x > rc.right - b) return HTRIGHT;
+            if (pt.y < rc.top + b) return HTTOP;
+            if (pt.y > rc.bottom - b) return HTBOTTOM;
+            return HTCAPTION;
+        }
+        break;
+    case WM_SIZING:
+        if (g_game_mode) {
+            RECT *r = (RECT*)lp;
+            int edge = (int)wp;
+            int w = r->right - r->left;
+            int h = r->bottom - r->top;
+            double aspect = 2.5;
+            int tw, th;
+            if (aspect < 0.5) aspect = 0.5;
+            if (aspect > 6.0) aspect = 6.0;
+            if (w < 160) w = 160;
+            if (h < 64) h = 64;
+            if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) { tw = (int)(h * aspect + 0.5); th = h; }
+            else { tw = w; th = (int)(w / aspect + 0.5); }
+            if (tw < 160) { tw = 160; th = (int)(tw / aspect + 0.5); }
+            if (th < 64)  { th = 64;  tw = (int)(th * aspect + 0.5); }
+            switch (edge) {
+            case WMSZ_LEFT:       r->left   = r->right - tw;  r->bottom = r->top + th; break;
+            case WMSZ_RIGHT:      r->right  = r->left + tw;   r->bottom = r->top + th; break;
+            case WMSZ_TOP:        r->top    = r->bottom - th; r->right  = r->left + tw; break;
+            case WMSZ_BOTTOM:     r->bottom = r->top + th;    r->right  = r->left + tw; break;
+            case WMSZ_TOPLEFT:    r->left   = r->right - tw;  r->top    = r->bottom - th; break;
+            case WMSZ_TOPRIGHT:   r->right  = r->left + tw;   r->top    = r->bottom - th; break;
+            case WMSZ_BOTTOMLEFT: r->left   = r->right - tw;  r->bottom = r->top + th; break;
+            case WMSZ_BOTTOMRIGHT:
+            default:              r->right  = r->left + tw;   r->bottom = r->top + th; break;
+            }
+            return TRUE;
+        }
+        break;
+    case WM_EXITSIZEMOVE:
+        if (g_game_mode) {
+            RECT gr; GetWindowRect(hwnd, &gr);
+            g_game_x = gr.left; g_game_y = gr.top;
+            g_game_w = gr.right - gr.left; g_game_h = gr.bottom - gr.top;
+            save_config();
         }
         break;
 
@@ -2252,8 +2757,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_TIMER:
         if (wp == IDT_UI) {
+            evaluate_window_scope();
             update_ui_labels();
-            if (g_active) {
+            if (g_game_mode) {
+                InvalidateRect(hwnd, NULL, FALSE);
+            } else if (g_active) {
                 RECT kbr = { KB_X - 5, KB_Y - 8, KB_X + 96*KU/4 + 5, KB_Y + 26*KU/4 + 35 };
                 InvalidateRect(hwnd, &kbr, FALSE);
             }
@@ -2325,6 +2833,63 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_setting_hk = 1; update_hotkey_labels(); break;
         case IDC_BTN_SETGMHK:
             g_setting_hk = 2; update_hotkey_labels(); break;
+        case IDC_COMBO_CONFIG:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                WCHAR sel_name[MAX_PATH];
+                int idx;
+                if (g_cfg_renaming) break;
+                if (g_active || g_scope_paused) {
+                    MessageBoxW(hwnd, L"\x8BF7\x5148\x5173\x95ED\x8FDE\x53D1\x540E\x518D\x5207\x6362\x914D\x7F6E\x3002",
+                        L"\x63D0\x793A", MB_OK | MB_ICONINFORMATION);
+                    refresh_cfg_combo();
+                    break;
+                }
+                idx = (int)SendMessageW(g_combo_config, CB_GETCURSEL, 0, 0);
+                if (idx != CB_ERR &&
+                    SendMessageW(g_combo_config, CB_GETLBTEXT, (WPARAM)idx, (LPARAM)sel_name) != CB_ERR) {
+                    switch_config_file(hwnd, sel_name, TRUE);
+                }
+            }
+            break;
+        case IDC_BTN_NEW_CONFIG: {
+            WCHAR new_name[64];
+            WCHAR path[MAX_PATH];
+            int i;
+            if (g_cfg_renaming) {
+                end_config_rename(hwnd, FALSE);
+            }
+            if (g_active || g_scope_paused) {
+                MessageBoxW(hwnd, L"\x8BF7\x5148\x5173\x95ED\x8FDE\x53D1\x540E\x518D\x65B0\x5EFA\x914D\x7F6E\x3002",
+                    L"\x63D0\x793A", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+            new_name[0] = 0;
+            for (i = 1; i < 1000; i++) {
+                HANDLE hf;
+                wsprintfW(new_name, L"config%d.json", i);
+                get_exe_dir(path, MAX_PATH);
+                lstrcatW(path, new_name);
+                hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+                if (hf == INVALID_HANDLE_VALUE) break;
+                CloseHandle(hf);
+            }
+            if (!new_name[0] || i >= 1000) {
+                MessageBoxW(hwnd, L"\x65E0\x6CD5\x521B\x5EFA\x65B0\x914D\x7F6E\x6587\x4EF6\x3002",
+                    L"\x9519\x8BEF", MB_OK | MB_ICONERROR);
+                break;
+            }
+            switch_config_file(hwnd, new_name, TRUE);
+            break;
+        }
+        case IDC_BTN_RENAME_CONFIG:
+            if (g_active || g_scope_paused) {
+                MessageBoxW(hwnd, L"\x8BF7\x5148\x5173\x95ED\x8FDE\x53D1\x540E\x518D\x91CD\x547D\x540D\x914D\x7F6E\x3002",
+                    L"\x63D0\x793A", MB_OK | MB_ICONINFORMATION);
+                break;
+            }
+            if (g_cfg_renaming) end_config_rename(hwnd, TRUE);
+            else begin_config_rename();
+            break;
         case IDC_CHK_KEYLOCK: {
             BOOL want = (SendMessageW(g_chk_keylock, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (want) {
@@ -2446,6 +3011,61 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             save_config();
             break;
         }
+        case IDC_CHK_CURWIN_ONLY: {
+            BOOL want = (SendMessageW(g_chk_curwin_only, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want && !g_curwin_only) {
+                int r = MessageBoxW(hwnd,
+                    L"\x5F00\x542F\x300C\x4EC5\x5728\x5F53\x524D\x7A97\x53E3\x751F\x6548\x300D\x540E\xFF1A\n\n"
+                    L"\x5F53\x4F60\x6309\x4E0B\x542F\x52A8\x952E\x65F6\x4F1A\x8BB0\x5F55\x5F53\x524D\x7A97\x53E3\x3002\n"
+                    L"\x7136\x540E\xFF1A\n"
+                    L"1) \x5728\x8BE5\x7A97\x53E3\x5185\xFF1A\x8FDE\x53D1\x6B63\x5E38\x751F\x6548\n"
+                    L"2) \x5207\x5230\x5176\x4ED6\x7A97\x53E3\xFF1A\x8FDE\x53D1\x81EA\x52A8\x6682\x505C\n"
+                    L"3) \x5207\x56DE\x8BE5\x7A97\x53E3\xFF1A\x8FDE\x53D1\x81EA\x52A8\x6062\x590D\n\n"
+                    L"\x786E\x8BA4\x5F00\x542F\x5417\xFF1F",
+                    L"\x4EC5\x5728\x5F53\x524D\x7A97\x53E3\x751F\x6548", MB_YESNO | MB_ICONQUESTION);
+                if (r != IDYES) {
+                    SendMessageW(g_chk_curwin_only, BM_SETCHECK, BST_UNCHECKED, 0);
+                    want = FALSE;
+                }
+            }
+            g_curwin_only = want;
+            if (g_curwin_only) {
+                if (g_active || g_scope_paused) {
+                    g_scope_target_root = get_scope_root(GetForegroundWindow());
+                    if (!g_scope_target_root) g_scope_target_root = get_scope_root(g_hwnd);
+                    g_scope_paused = FALSE;
+                    evaluate_window_scope();
+                }
+            } else {
+                g_scope_target_root = NULL;
+                if (g_scope_paused) {
+                    g_scope_paused = FALSE;
+                    set_active_state(TRUE, FALSE, FALSE);
+                }
+            }
+            save_config();
+            update_ui_labels();
+            InvalidateRect(hwnd, NULL, TRUE);
+            break;
+        }
+        case IDC_CHK_SKILL_FLICKER: {
+            BOOL next_on = (SendMessageW(g_chk_skill_flicker, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (next_on && !g_skill_flicker) {
+                int r = MessageBoxW(hwnd,
+                    L"\x8BE5\x914D\x7F6E\x53EF\x4EE5\x4F7F\x5F97\x6309\x952E\x5728\x8FDE\x53D1\x65F6\x6B63\x5E38\x95EA\x70C1\xFF0C\n"
+                    L"\x4F46\x53EF\x80FD\x5728\x4E00\x5B9A\x7A0B\x5EA6\x4E0A\x5F71\x54CD\x8FDE\x53D1\x6027\x80FD\x3002\n\n"
+                    L"\x786E\x8BA4\x5F00\x542F\x5417\xFF1F",
+                    L"\x6280\x80FD\x5FEB\x901F\x95EA\x70C1",
+                    MB_YESNO | MB_ICONQUESTION);
+                if (r != IDYES) {
+                    SendMessageW(g_chk_skill_flicker, BM_SETCHECK, BST_UNCHECKED, 0);
+                    next_on = FALSE;
+                }
+            }
+            g_skill_flicker = next_on;
+            save_config();
+            break;
+        }
         case IDC_BTN_SOUND:
             g_sound_enabled = !g_sound_enabled;
             update_sound_btn();
@@ -2479,6 +3099,11 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             AppendMenuW(hMenu, MF_STRING, IDM_GM_TOGGLE,
                 g_active ? L"\x5173\x95ED\x8FDE\x53D1" : L"\x5F00\x542F\x8FDE\x53D1");
             AppendMenuW(hMenu, MF_STRING, IDM_GM_SHOWMAIN, L"\x663E\x793A\x4E3B\x754C\x9762");
+            {
+                WCHAR s[64];
+                wsprintfW(s, L"\x4E10\x610F\x503C\x8C03\x8282... (%d%%)", g_gaiyi_value);
+                AppendMenuW(hMenu, MF_STRING, IDM_GM_GAIYI, s);
+            }
             AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
             AppendMenuW(hMenu, MF_STRING, IDM_GM_EXIT, L"\x9000\x51FA");
             POINT pt; GetCursorPos(&pt);
@@ -2487,6 +3112,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DestroyMenu(hMenu);
             if (cmd == IDM_GM_TOGGLE) toggle_active();
             else if (cmd == IDM_GM_SHOWMAIN) toggle_game_mode(hwnd);
+            else if (cmd == IDM_GM_GAIYI) show_gaiyi_popup(hwnd);
             else if (cmd == IDM_GM_EXIT) DestroyWindow(hwnd);
             return 0;
         }
@@ -2620,7 +3246,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     if (wcsncmp(p, L"/install", 8) == 0) return do_install();
     if (wcsncmp(p, L"/uninstall", 10) == 0) return do_uninstall();
 
-    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_LINK_CLASS };
+    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_LINK_CLASS | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
 
     if (!load_interception_dll()) {
@@ -2637,6 +3263,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     init_interception();
     init_keyrects();
     init_gdi_cache();
+    g_game_fx_start_tick = GetTickCount();
 
     if (!g_drv_ok) try_auto_install();
     if (g_ctx) g_ithread = CreateThread(NULL, 0, intercept_proc, NULL, 0, NULL);
@@ -2658,8 +3285,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
-    /* UTF-8: 丐帮高手V4.2 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8BV4.2";
+    /* UTF-8: 丐帮高手v5.0 - convert at runtime to avoid source encoding issues */
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv5.0";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(0, L"AutoKeyClass",
