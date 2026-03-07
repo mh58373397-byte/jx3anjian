@@ -86,7 +86,8 @@ enum {
     MC_KEY_DOWN, MC_KEY_UP, MC_DELAY,
     MC_MOUSE_MOVE, MC_MOUSE_LDOWN, MC_MOUSE_LUP,
     MC_MOUSE_RDOWN, MC_MOUSE_RUP, MC_MOUSE_MDOWN, MC_MOUSE_MUP,
-    MC_MOUSE_X1DOWN, MC_MOUSE_X1UP, MC_MOUSE_X2DOWN, MC_MOUSE_X2UP
+    MC_MOUSE_X1DOWN, MC_MOUSE_X1UP, MC_MOUSE_X2DOWN, MC_MOUSE_X2UP,
+    MC_MOUSE_WHEEL_UP, MC_MOUSE_WHEEL_DOWN
 };
 
 typedef struct {
@@ -144,6 +145,8 @@ static MacroStep s_play_cmds[MAX_MACRO_CMDS];
 static int       s_play_cmd_count = 0;
 static int       s_play_loop_cur = 0;
 static int       s_play_loop_total = 0;
+static BOOL      s_play_key_down[256];
+static unsigned short s_play_mouse_down_mask = 0;
 
 static HHOOK  s_macro_kbhook = NULL;
 static HHOOK  s_macro_mousehook = NULL;
@@ -316,6 +319,10 @@ update_desc:;
         else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_4_UP)        lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77");
         else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B");
         else if (evt->mouse_state & INTERCEPTION_MOUSE_BUTTON_5_UP)        lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77");
+        else if (evt->mouse_state & INTERCEPTION_MOUSE_WHEEL) {
+            if (evt->mouse_rolling > 0) lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u6EDA\u8F6E\u4E0A\u6EDA");
+            else if (evt->mouse_rolling < 0) lstrcpyW(s_last_evt_desc, L"\u9F20\u6807\u6EDA\u8F6E\u4E0B\u6EDA");
+        }
         break;
     }
 }
@@ -369,6 +376,10 @@ static void build_script_from_recording(void) {
             if (st & INTERCEPTION_MOUSE_BUTTON_4_UP)        SAPP0(L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77\r\n");
             if (st & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      { SAPP(L"\u9F20\u6807\u79FB\u52A8\u5230:%d,%d\r\n", mx, my); SAPP0(L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B\r\n"); }
             if (st & INTERCEPTION_MOUSE_BUTTON_5_UP)        SAPP0(L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77\r\n");
+            if (st & INTERCEPTION_MOUSE_WHEEL) {
+                if (local[i].mouse_rolling > 0) SAPP0(L"\u9F20\u6807\u6EDA\u8F6E\u4E0A\u6EDA\r\n");
+                else if (local[i].mouse_rolling < 0) SAPP0(L"\u9F20\u6807\u6EDA\u8F6E\u4E0B\u6EDA\r\n");
+            }
             break;
         }
         }
@@ -472,6 +483,8 @@ static int parse_script(const WCHAR *text, MacroStep *cmds, int max_cmds) {
           else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E1\u5F39\u8D77") == 0 || wcscmp(line, L"\u9F20\u6807X1\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_X1UP; cmds[count++] = s; }
           else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E2\u6309\u4E0B") == 0 || wcscmp(line, L"\u9F20\u6807X2\u6309\u4E0B") == 0) { s.cmd = MC_MOUSE_X2DOWN; cmds[count++] = s; }
           else if (wcscmp(line, L"\u9F20\u6807\u4FA7\u952E2\u5F39\u8D77") == 0 || wcscmp(line, L"\u9F20\u6807X2\u5F39\u8D77") == 0) { s.cmd = MC_MOUSE_X2UP; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u6EDA\u8F6E\u4E0A\u6EDA") == 0) { s.cmd = MC_MOUSE_WHEEL_UP; cmds[count++] = s; }
+          else if (wcscmp(line, L"\u9F20\u6807\u6EDA\u8F6E\u4E0B\u6EDA") == 0) { s.cmd = MC_MOUSE_WHEEL_DOWN; cmds[count++] = s; }
     }
     return count;
 }
@@ -509,15 +522,42 @@ static void play_sleep_ms(int ms) {
     while (remaining > 0 && s_macro_playing) {
         int chunk = (remaining > 2) ? 2 : remaining;
         Sleep(chunk); remaining -= chunk;
-        if (s_press_poll_vk > 0 && !(GetAsyncKeyState(s_press_poll_vk) & 0x8000)) {
-            s_macro_playing = FALSE;
-            return;
-        }
         QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart >= target) return;
     }
     do { YieldProcessor(); QueryPerformanceCounter(&now); }
     while (now.QuadPart - start.QuadPart < target && s_macro_playing);
+}
+
+static void reset_playback_pressed_inputs(void) {
+    InterceptionDevice kb_dev = find_keyboard_device();
+    InterceptionDevice ms_dev = find_mouse_device();
+    if (kb_dev && g_ctx) {
+        for (int sc = 0; sc < 256; sc++) {
+            if (!s_play_key_down[sc]) continue;
+            {
+                InterceptionKeyStroke ks;
+                ks.code = (unsigned short)sc;
+                ks.state = INTERCEPTION_KEY_UP;
+                ks.information = 0;
+                pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
+            }
+            s_play_key_down[sc] = FALSE;
+        }
+    } else {
+        memset(s_play_key_down, 0, sizeof(s_play_key_down));
+    }
+    if (ms_dev && g_ctx && s_play_mouse_down_mask) {
+        InterceptionMouseStroke ms;
+        memset(&ms, 0, sizeof(ms));
+        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN)   ms.state |= INTERCEPTION_MOUSE_LEFT_BUTTON_UP;
+        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN)  ms.state |= INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;
+        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN) ms.state |= INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;
+        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_4_DOWN)      ms.state |= INTERCEPTION_MOUSE_BUTTON_4_UP;
+        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      ms.state |= INTERCEPTION_MOUSE_BUTTON_5_UP;
+        if (ms.state) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
+    }
+    s_play_mouse_down_mask = 0;
 }
 
 static DWORD WINAPI play_thread_proc(LPVOID p) {
@@ -533,10 +573,12 @@ static DWORD WINAPI play_thread_proc(LPVOID p) {
             case MC_KEY_DOWN: {
                 InterceptionKeyStroke ks; ks.code = cmd->scan; ks.state = INTERCEPTION_KEY_DOWN; ks.information = 0;
                 if (kb_dev && g_ctx) pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
+                s_play_key_down[cmd->scan & 0xFF] = TRUE;
                 break; }
             case MC_KEY_UP: {
                 InterceptionKeyStroke ks; ks.code = cmd->scan; ks.state = INTERCEPTION_KEY_UP; ks.information = 0;
                 if (kb_dev && g_ctx) pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
+                s_play_key_down[cmd->scan & 0xFF] = FALSE;
                 break; }
             case MC_DELAY: play_sleep_ms(cmd->delay_ms); break;
             case MC_MOUSE_MOVE: {
@@ -547,29 +589,51 @@ static DWORD WINAPI play_thread_proc(LPVOID p) {
                 ms.y = (int)((long long)cmd->y * 65535 / sy);
                 if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
                 break; }
-            case MC_MOUSE_LDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_LUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_UP;   if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_RDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_RUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_MDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_MUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_X1DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_X1UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_X2DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
-            case MC_MOUSE_X2UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); break; }
+            case MC_MOUSE_LDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break; }
+            case MC_MOUSE_LUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_UP;   if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break; }
+            case MC_MOUSE_RDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break; }
+            case MC_MOUSE_RUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break; }
+            case MC_MOUSE_MDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break; }
+            case MC_MOUSE_MUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break; }
+            case MC_MOUSE_X1DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_4_DOWN; break; }
+            case MC_MOUSE_X1UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_4_DOWN; break; }
+            case MC_MOUSE_X2DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_5_DOWN; break; }
+            case MC_MOUSE_X2UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_5_DOWN; break; }
+            case MC_MOUSE_WHEEL_UP: {
+                InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms));
+                ms.state = INTERCEPTION_MOUSE_WHEEL;
+                ms.rolling = WHEEL_DELTA;
+                if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
+                break;
+            }
+            case MC_MOUSE_WHEEL_DOWN: {
+                InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms));
+                ms.state = INTERCEPTION_MOUSE_WHEEL;
+                ms.rolling = (short)-WHEEL_DELTA;
+                if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
+                break;
+            }
             }
         }
         Sleep(1);
         loop_idx++;
     }
+    reset_playback_pressed_inputs();
     s_macro_playing = FALSE;
     return 0;
 }
 
 static void stop_playback(void) {
-    if (!s_macro_playing) return;
+    if (!s_macro_playing) {
+        reset_playback_pressed_inputs();
+        return;
+    }
     s_macro_playing = FALSE;
     if (s_play_thread) { WaitForSingleObject(s_play_thread, 2000); CloseHandle(s_play_thread); s_play_thread = NULL; }
+    reset_playback_pressed_inputs();
+    if (s_macro_hwnd) KillTimer(s_macro_hwnd, IDT_MACRO_PRESS_POLL);
+    if (g_hwnd) KillTimer(g_hwnd, IDT_MACRO_PRESS_POLL);
+    s_press_poll_vk = 0;
     s_playing_slot = -1;
     if (s_lbl_status) SetWindowTextW(s_lbl_status, L"\u72B6\u6001: \u5DF2\u505C\u6B62");
 }
@@ -596,6 +660,8 @@ static void start_playback(void) {
     s_play_loop_total = infinite ? 0 : loops;
     s_play_loop_cur = 0;
     s_playing_slot = s_current_slot;
+    memset(s_play_key_down, 0, sizeof(s_play_key_down));
+    s_play_mouse_down_mask = 0;
     s_macro_playing = TRUE;
     s_play_thread = CreateThread(NULL, 0, play_thread_proc, NULL, 0, NULL);
     if (s_lbl_status) SetWindowTextW(s_lbl_status, L"\u72B6\u6001: \u6B63\u5728\u6267\u884C...");
@@ -615,6 +681,8 @@ static void start_playback_slot(int slot, BOOL force_infinite) {
         s_play_loop_total = ms->infinite ? 0 : (ms->loops < 1 ? 1 : ms->loops);
     s_play_loop_cur = 0;
     s_playing_slot = slot;
+    memset(s_play_key_down, 0, sizeof(s_play_key_down));
+    s_play_mouse_down_mask = 0;
     s_macro_playing = TRUE;
     s_play_thread = CreateThread(NULL, 0, play_thread_proc, NULL, 0, NULL);
 }
@@ -1069,7 +1137,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         s_btn_new = CreateWindowW(L"BUTTON", L"\u65B0\u5EFA", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 232, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_NEW, NULL, NULL);
         CreateWindowW(L"BUTTON", L"\u5220\u9664", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 300, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_DEL, NULL, NULL);
         CreateWindowW(L"BUTTON", L"\u6539\u540D", WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, 368, y, 62, 28, hwnd, (HMENU)(INT_PTR)IDC_M_BTN_RENAME, NULL, NULL);
-        s_chk_enabled = CreateWindowW(L"BUTTON", L"\u751F\u6548", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 446, y+4, 55, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_ENABLED, NULL, NULL);
+        s_chk_enabled = CreateWindowW(L"BUTTON", L"\u751F\u6548(\u53D6\u6D88\u540E\u53EF\u4FEE\u6539\u5B8F\u5185\u5BB9)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 446, y+4, 210, 20, hwnd, (HMENU)(INT_PTR)IDC_M_CHK_ENABLED, NULL, NULL);
         SendMessageW(s_chk_enabled, WM_SETFONT, (WPARAM)hf, TRUE);
 
         lbl = CreateWindowW(L"STATIC", L"\u70ED\u952E\u8BBE\u7F6E", WS_CHILD|WS_VISIBLE, 10, y+40, 80, 20, hwnd, NULL, NULL, NULL);
@@ -1155,7 +1223,7 @@ static LRESULT CALLBACK macro_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (pt.x != s_last_mouse_x || pt.y != s_last_mouse_y) {
                 MacroEvent me;
                 me.type = MACRO_EVT_MOUSE_MOVE;
-                me.vk = 0; me.scan = 0; me.flags = 0; me.mouse_state = 0;
+                me.vk = 0; me.scan = 0; me.flags = 0; me.mouse_state = 0; me.mouse_rolling = 0;
                 me.mouse_x = pt.x; me.mouse_y = pt.y;
                 QueryPerformanceCounter(&me.timestamp);
                 macro_push_event(&me);
@@ -1448,11 +1516,28 @@ void macro_handle_play_hotkey(int slot_index) {
 }
 
 void macro_check_press_release(void) {
-    if (s_press_poll_vk > 0 && !(GetAsyncKeyState(s_press_poll_vk) & 0x8000)) {
-        s_press_poll_vk = 0;
-        if (s_macro_hwnd) KillTimer(s_macro_hwnd, IDT_MACRO_PRESS_POLL);
-        KillTimer(g_hwnd, IDT_MACRO_PRESS_POLL);
-        /* 按压模式松开时静默停止：不触发开/关音效消息 */
-        stop_playback();
-    }
+    /* 释放判定统一走 Interception 事件回调（macro_on_hotkey_transition） */
+}
+
+void macro_on_hotkey_transition(int vk, BOOL is_down) {
+    if (!g_macro_press_mode || !s_macro_playing || s_press_poll_vk <= 0) return;
+    if (vk != s_press_poll_vk) return;
+    if (is_down) return;
+    s_press_poll_vk = 0;
+    if (s_macro_hwnd) KillTimer(s_macro_hwnd, IDT_MACRO_PRESS_POLL);
+    KillTimer(g_hwnd, IDT_MACRO_PRESS_POLL);
+    stop_playback();
+}
+
+void macro_stop_all(void) {
+    if (g_macro_recording) stop_recording();
+    stop_playback();
+}
+
+BOOL macro_is_playing(void) {
+    return s_macro_playing;
+}
+
+BOOL macro_is_press_mode_playing(void) {
+    return (g_macro_press_mode && s_macro_playing);
 }

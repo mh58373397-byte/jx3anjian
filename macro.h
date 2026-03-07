@@ -17,6 +17,7 @@ typedef struct {
     unsigned short scan;
     unsigned short flags;
     unsigned short mouse_state;
+    short mouse_rolling;
     int mouse_x, mouse_y;
     LARGE_INTEGER timestamp;
 } MacroEvent;
@@ -56,6 +57,10 @@ void macro_register_play_hotkeys(HWND hwnd);
 void macro_unregister_play_hotkeys(HWND hwnd);
 void macro_handle_play_hotkey(int slot_index);
 void macro_check_press_release(void);
+void macro_stop_all(void);
+BOOL macro_is_playing(void);
+BOOL macro_is_press_mode_playing(void);
+void macro_on_hotkey_transition(int vk, BOOL is_down);
 void macro_save_config_to(char *buf, int *pos, int rem);
 void macro_load_config_from(const char *json);
 
