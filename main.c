@@ -153,6 +153,8 @@ static BOOL load_interception_dll(void) {
 #define IDM_GM_SHOWMAIN    201
 #define IDM_GM_EXIT        202
 #define IDM_GM_GAIYI       203
+#define IDM_KB_EXCLUSIVE_SET   210
+#define IDM_KB_EXCLUSIVE_CLEAR 211
 #define WM_PLAY_TOGGLE_SOUND (WM_APP + 10)
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
@@ -195,6 +197,9 @@ static volatile BOOL               g_macro_kbd_hk_down[MAX_KID];
 
 static BOOL  g_exclude[256];
 static BOOL  g_custom_keys[256];
+static BOOL  g_exclusive_keys[256];
+static volatile LONG g_exclusive_excluded_hold_count = 0;
+static volatile BOOL g_exclusive_macro_break_toggle = FALSE;
 static BOOL  g_game_mode    = FALSE;
 static HHOOK g_kbhook       = NULL;
 static HHOOK g_mshook       = NULL;
@@ -284,6 +289,7 @@ static HBRUSH g_br_skip      = NULL;
 static HBRUSH g_br_kbbg      = NULL;
 static HBRUSH g_br_macro     = NULL;
 static HBRUSH g_br_swap      = NULL;
+static HBRUSH g_br_exclusive = NULL;
 static HBRUSH g_br_drag_src  = NULL;
 static HBRUSH g_br_drag_dst  = NULL;
 
@@ -307,6 +313,7 @@ static void init_gdi_cache(void) {
     g_br_kbbg     = CreateSolidBrush(RGB(240,240,240));
     g_br_macro    = CreateSolidBrush(RGB(50,120,200));
     g_br_swap     = CreateSolidBrush(RGB(230,160,0));
+    g_br_exclusive = CreateSolidBrush(RGB(150,60,210));
     g_br_drag_src = CreateSolidBrush(RGB(100,180,255));
     g_br_drag_dst = CreateSolidBrush(RGB(255,100,100));
 }
@@ -314,7 +321,7 @@ static void init_gdi_cache(void) {
 static void cleanup_gdi_cache(void) {
     HGDIOBJ objs[] = { g_font_kb, g_font_legend, g_font_ui, g_font_game, g_pen_border,
                        g_br_excl, g_br_hold, g_br_custom, g_br_unsel, g_br_skip, g_br_kbbg, g_br_macro,
-                       g_br_swap, g_br_drag_src, g_br_drag_dst };
+                       g_br_swap, g_br_exclusive, g_br_drag_src, g_br_drag_dst };
     for (int i = 0; i < (int)(sizeof(objs)/sizeof(objs[0])); i++)
         if (objs[i]) DeleteObject(objs[i]);
     if (g_paint_memdc) {
@@ -327,6 +334,7 @@ static void cleanup_gdi_cache(void) {
 static int kid_to_vk(int kid);
 static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0);
 static InterceptionDevice pick_keyboard_out_dev(void);
+static BOOL sanitize_exclusive_conflicts(void);
 
 #define MAX_ACTIVE 16
 typedef struct {
@@ -589,6 +597,9 @@ void save_config(void) {
     SCFG("],\n  \"custom_keys\": [%s", "");
     first = 1;
     for (int i = 1; i < 256 && rem > 8; i++) { if (!g_custom_keys[i]) continue; if (!first) SCFG(",%s",""); SCFG("%d", i); first = 0; }
+    SCFG("],\n  \"exclusive_keys\": [%s", "");
+    first = 1;
+    for (int i = 1; i < 256 && rem > 8; i++) { if (!g_exclusive_keys[i]) continue; if (!first) SCFG(",%s",""); SCFG("%d", i); first = 0; }
     SCFG("],\n%s", "");
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
@@ -639,6 +650,7 @@ static void load_config(void) {
     DWORD fileSize = GetFileSize(hFile, NULL);
     if (fileSize == 0 || fileSize > 10*1024*1024) { CloseHandle(hFile); return; }
     char *buf = (char*)malloc(fileSize + 1);
+    BOOL exclusive_sanitized = FALSE;
     if (!buf) { CloseHandle(hFile); return; }
     DWORD bytesRead;
     ReadFile(hFile, buf, fileSize, &bytesRead, NULL); CloseHandle(hFile);
@@ -653,6 +665,8 @@ static void load_config(void) {
     if (p) { memset(g_exclude, 0, sizeof(g_exclude)); parse_int_array(p, g_exclude, 256); }
     p = strstr(buf, "\"custom_keys\"");
     if (p) { memset(g_custom_keys, 0, sizeof(g_custom_keys)); parse_int_array(p, g_custom_keys, 256); }
+    p = strstr(buf, "\"exclusive_keys\"");
+    if (p) { memset(g_exclusive_keys, 0, sizeof(g_exclusive_keys)); parse_int_array(p, g_exclusive_keys, 256); }
     p = strstr(buf, "\"game_x\""); if (p) { p = strchr(p, ':'); if (p) g_game_x = atoi(p+1); }
     p = strstr(buf, "\"game_y\""); if (p) { p = strchr(p, ':'); if (p) g_game_y = atoi(p+1); }
     p = strstr(buf, "\"game_w\""); if (p) { p = strchr(p, ':'); if (p) { g_game_w = atoi(p+1); if (g_game_w<100) g_game_w=200; } }
@@ -701,6 +715,8 @@ static void load_config(void) {
             } else if (*p != ']') p++;
         }
     }
+    exclusive_sanitized = sanitize_exclusive_conflicts();
+    if (exclusive_sanitized) save_config();
     macro_load_config_from(buf);
     free(buf);
 }
@@ -856,6 +872,51 @@ static void toggle_key_mode_by_vk(int vk) {
         }
         save_config();
     }
+}
+
+static int map_display_vk_for_click(int vk) {
+    if (g_swap_enabled && vk > 0 && vk < 256 && g_key_swap[vk])
+        return g_key_swap[vk];
+    return vk;
+}
+
+static int get_slot_policy_vk(int cfg_vk, int logic_vk, BOOL swap_applied) {
+    if (swap_applied && logic_vk > 0 && logic_vk < 256) return logic_vk;
+    return cfg_vk;
+}
+
+static BOOL can_set_exclusive_for_vk(int vk) {
+    if (vk <= 0 || vk >= 256) return FALSE;
+    if (vk == g_hk_toggle_vk || vk == g_hk_game_vk) return FALSE;
+    return TRUE;
+}
+
+static BOOL should_toggle_key_for_input(int cfg_vk, int logic_vk, BOOL swap_applied) {
+    int vk = get_slot_policy_vk(cfg_vk, logic_vk, swap_applied);
+    return (vk > 0 && vk < 256 && g_custom_keys[vk] && !is_skippable(vk));
+}
+
+static BOOL is_exclusive_for_slot(int cfg_vk, int logic_vk, BOOL swap_applied) {
+    int vk = get_slot_policy_vk(cfg_vk, logic_vk, swap_applied);
+    return (vk > 0 && vk < 256 && g_exclusive_keys[vk]);
+}
+
+static BOOL is_excluded_for_slot(int cfg_vk, int logic_vk, BOOL swap_applied) {
+    int vk = get_slot_policy_vk(cfg_vk, logic_vk, swap_applied);
+    return (vk > 0 && vk < 256 && g_exclude[vk]);
+}
+
+static BOOL sanitize_exclusive_conflicts(void) {
+    BOOL changed = FALSE;
+    if (g_hk_toggle_vk > 0 && g_hk_toggle_vk < 256 && g_exclusive_keys[g_hk_toggle_vk]) {
+        g_exclusive_keys[g_hk_toggle_vk] = FALSE;
+        changed = TRUE;
+    }
+    if (g_hk_game_vk > 0 && g_hk_game_vk < 256 && g_exclusive_keys[g_hk_game_vk]) {
+        g_exclusive_keys[g_hk_game_vk] = FALSE;
+        changed = TRUE;
+    }
+    return changed;
 }
 
 static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0) {
@@ -1224,6 +1285,8 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 }
                 BOOL is_hk = (logic_vk == g_hk_toggle_vk || logic_vk == g_hk_game_vk);
                 BOOL is_macro_press_hotkey = FALSE;
+                BOOL is_exclusive_excluded = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied) &&
+                    is_excluded_for_slot(cfg_vk, logic_vk, swap_applied);
                 if (g_macro_active && g_macro_press_mode && (g_active || g_macro_no_start)) {
                     if (logic_vk == g_macro_hk_stop_vk) {
                         is_macro_press_hotkey = TRUE;
@@ -1259,19 +1322,24 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 }
                 if (ks->state & INTERCEPTION_KEY_UP) {
                     if (!is_hk) {
+                        if (is_exclusive_excluded && g_held[logic_kid]) {
+                            LONG prev = InterlockedDecrement(&g_exclusive_excluded_hold_count);
+                            if (prev < 0) InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+                        }
                         g_held[logic_kid]=FALSE; g_hdev[logic_kid]=0;
                         if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
-                            if (!(g_mode==MODE_HYBRID && g_toggled[logic_kid]))
+                            BOOL keep_toggle = (g_mode==MODE_HYBRID && g_toggled[logic_kid] &&
+                                should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied));
+                            if (!keep_toggle)
                                 active_remove(logic_kid);
                         }
                     }
                 } else if (!is_hk) {
+                    if (is_exclusive_excluded && !g_held[logic_kid]) {
+                        InterlockedIncrement(&g_exclusive_excluded_hold_count);
+                    }
                     if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[logic_kid]) {
-                        BOOL cfg_match = FALSE;
-                        if (cfg_vk>0 && cfg_vk<256 && g_custom_keys[cfg_vk] && !is_skippable(cfg_vk))
-                            cfg_match = TRUE;
-                        else if (swap_applied && logic_vk>0 && logic_vk<256 && g_custom_keys[logic_vk] && !is_skippable(logic_vk))
-                            cfg_match = TRUE;
+                        BOOL cfg_match = should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied);
                         if (cfg_match) {
                             if (g_toggled[logic_kid]) {
                                 g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
@@ -1382,6 +1450,8 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 if (logic_kid < 0 || logic_kid >= MAX_KID) continue;
                 InterceptionDevice logic_dev = pick_logic_dev(logic_kid, dev);
                 BOOL is_hk = (logic_vk == g_hk_toggle_vk || logic_vk == g_hk_game_vk);
+                BOOL is_exclusive_excluded = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied) &&
+                    is_excluded_for_slot(cfg_vk, logic_vk, swap_applied);
                 BOOL is_macro_press_hotkey = FALSE;
                 if (g_macro_active && g_macro_press_mode && (g_active || g_macro_no_start)) {
                     if (logic_vk == g_macro_hk_stop_vk) {
@@ -1405,9 +1475,15 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                 if (has_dn) macro_on_hotkey_transition(logic_vk, TRUE);
                 if (has_up) macro_on_hotkey_transition(logic_vk, FALSE);
                 if (has_up) {
+                    if (!is_hk && is_exclusive_excluded && g_held[logic_kid]) {
+                        LONG prev = InterlockedDecrement(&g_exclusive_excluded_hold_count);
+                        if (prev < 0) InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+                    }
                     g_held[logic_kid]=FALSE; g_hdev[logic_kid]=0;
                     if (!is_hk && (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)) {
-                        if (!(g_mode==MODE_HYBRID && g_toggled[logic_kid]))
+                        BOOL keep_toggle = (g_mode==MODE_HYBRID && g_toggled[logic_kid] &&
+                            should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied));
+                        if (!keep_toggle)
                             active_remove(logic_kid);
                     }
                 }
@@ -1420,12 +1496,11 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                         g_held[logic_kid]=TRUE; g_hdev[logic_kid]=logic_dev;
                         continue;
                     }
+                    if (is_exclusive_excluded && !g_held[logic_kid]) {
+                        InterlockedIncrement(&g_exclusive_excluded_hold_count);
+                    }
                     if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[logic_kid]) {
-                        BOOL cfg_match = FALSE;
-                        if (cfg_vk>0 && cfg_vk<256 && g_custom_keys[cfg_vk] && !is_skippable(cfg_vk))
-                            cfg_match = TRUE;
-                        else if (swap_applied && logic_vk>0 && logic_vk<256 && g_custom_keys[logic_vk] && !is_skippable(logic_vk))
-                            cfg_match = TRUE;
+                        BOOL cfg_match = should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied);
                         if (cfg_match) {
                             if (g_toggled[logic_kid]) {
                                 g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
@@ -1550,6 +1625,13 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
         if (cnt == 0) { Sleep(1); continue; }
         mode = g_mode; delay = g_delay;
         BOOL pause_toggled = FALSE;
+        BOOL pause_nonexclusive_toggled = FALSE;
+        BOOL has_exclusive_toggle = FALSE;
+        BOOL has_exclusive_hold = FALSE;
+        BOOL pause_all_silent = (g_exclusive_excluded_hold_count > 0);
+        if (g_exclusive_macro_break_toggle) {
+            pause_toggled = TRUE;
+        }
         if (mode == MODE_HYBRID && g_pause_toggle_on_hold) {
             if (macro_is_playing()) {
                 pause_toggled = TRUE;
@@ -1561,22 +1643,48 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
                 }
             }
         }
+        for (i = 0; i < cnt; i++) {
+            int vk = local_slots[i].vk;
+            int logic_vk_cfg = kid_to_vk(local_slots[i].kid);
+            BOOL toggle_allowed;
+            BOOL is_toggled_on;
+            BOOL is_held_on = local_held[i];
+            if (logic_vk_cfg <= 0 || logic_vk_cfg >= 256) logic_vk_cfg = vk;
+            if (!is_exclusive_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap)) continue;
+            toggle_allowed = should_toggle_key_for_input(vk, logic_vk_cfg, local_slots[i].from_swap);
+            is_toggled_on = local_toggled[i] && toggle_allowed;
+            if (is_toggled_on) has_exclusive_toggle = TRUE;
+            if (is_held_on && (mode == MODE_HOLD || (mode == MODE_HYBRID && !is_toggled_on))) {
+                if (!is_excluded_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap))
+                    has_exclusive_hold = TRUE;
+            }
+            if (has_exclusive_toggle && has_exclusive_hold) break;
+        }
+        if (has_exclusive_hold) pause_toggled = TRUE;
+        if (has_exclusive_toggle) pause_nonexclusive_toggled = TRUE;
         for (i = 0; i < cnt && g_active; i++) {
             int vk = local_slots[i].vk;
             int logic_vk_cfg = kid_to_vk(local_slots[i].kid);
-            BOOL is_toggled_on = local_toggled[i];
+            BOOL toggle_allowed;
+            BOOL is_toggled_on;
             BOOL is_held_on = local_held[i];
             BOOL is_on;
             BOOL use_flicker_order;
             InterceptionDevice idev;
             BOOL block_src;
             BOOL block_logic;
+            BOOL is_exclusive_slot;
             if (logic_vk_cfg <= 0 || logic_vk_cfg >= 256) logic_vk_cfg = vk;
+            toggle_allowed = should_toggle_key_for_input(vk, logic_vk_cfg, local_slots[i].from_swap);
+            is_toggled_on = local_toggled[i] && toggle_allowed;
             if (mode==MODE_HYBRID) is_on = is_toggled_on || (is_held_on && !is_toggled_on);
             else if (mode==MODE_HOLD) is_on = is_held_on;
             else is_on = is_toggled_on;
             if (!is_on) continue;
+            if (pause_all_silent) continue;
             if (pause_toggled && is_toggled_on && !is_held_on) continue;
+            is_exclusive_slot = is_exclusive_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap);
+            if (pause_nonexclusive_toggled && is_toggled_on && !is_held_on && !is_exclusive_slot) continue;
             block_src = (is_skippable(vk) || is_excluded(vk));
             block_logic = (is_skippable(logic_vk_cfg) || is_excluded(logic_vk_cfg));
             if (mode==MODE_HOLD || (mode==MODE_HYBRID && !is_toggled_on)) {
@@ -1771,6 +1879,8 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
         if (with_sound) play_global_sound(TRUE);
     } else {
         if (!g_active) {
+            InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+            g_exclusive_macro_break_toggle = FALSE;
             release_intercepted_hotkeys();
             if (stop_macro_with_global) macro_stop_all();
             return;
@@ -1783,6 +1893,8 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
             if (g_key_lock) send_toggled_keyups();
             else release_toggled();
         }
+        InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+        g_exclusive_macro_break_toggle = FALSE;
         if (with_sound) play_global_sound(FALSE);
     }
 }
@@ -1933,6 +2045,7 @@ static void apply_main_hotkey_selection(int vk) {
     }
     if (g_setting_hk == 1) g_hk_toggle_vk = vk;
     else if (g_setting_hk == 2) g_hk_game_vk = vk;
+    sanitize_exclusive_conflicts();
     apply_hotkey_registration(g_hwnd);
     g_setting_hk = 0;
     save_config();
@@ -2419,6 +2532,12 @@ static void paint_keyboard(HDC hdc) {
 
         SetTextColor(hdc, text);
         DrawTextW(hdc, draw_label, -1, &r, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        if (vk > 0 && vk < 256 && g_exclusive_keys[vk]) {
+            RECT tag = { r.right - 10, r.top + 1, r.right - 1, r.top + 10 };
+            FillRect(hdc, &tag, g_br_exclusive);
+            SetTextColor(hdc, RGB(255,255,255));
+            DrawTextW(hdc, L"E", -1, &tag, DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        }
     }
 
     SelectObject(hdc, old_pen);
@@ -2466,6 +2585,9 @@ static void paint_keyboard_legend(HDC hdc, int y) {
         FillRect(hdc, &sq, g_br_macro);
         TextOutW(hdc, x+16, y-1, L"\x5B8F", 1);
     }
+    x += 45; sq.left=x; sq.right=x+12;
+    FillRect(hdc, &sq, g_br_exclusive);
+    TextOutW(hdc, x+16, y-1, L"\x72EC\x5360(\x9F20\x6807\x53F3\x952E\x8BBE\x7F6E)", 11);
 
     SelectObject(hdc, old);
 }
@@ -2917,6 +3039,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_TIMER:
         if (wp == IDT_UI) {
+            if (g_exclusive_macro_break_toggle && !macro_is_playing()) {
+                g_exclusive_macro_break_toggle = FALSE;
+            }
             evaluate_window_scope();
             update_ui_labels();
             if (g_game_mode) {
@@ -2975,8 +3100,20 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         else if (g_macro_active && (g_active || g_macro_no_start) && wp == ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
             macro_handle_play_hotkey(-1);
-        else if (g_macro_active && (g_active || g_macro_no_start) && wp >= ID_HK_MACRO_BASE && wp < ID_HK_MACRO_BASE + MAX_MACRO_SLOTS)
-            macro_handle_play_hotkey((int)(wp - ID_HK_MACRO_BASE));
+        else if (g_macro_active && (g_active || g_macro_no_start) && wp >= ID_HK_MACRO_BASE && wp < ID_HK_MACRO_BASE + MAX_MACRO_SLOTS) {
+            int slot = (int)(wp - ID_HK_MACRO_BASE);
+            BOOL exclusive_macro_break = FALSE;
+            if (!g_macro_press_mode && slot >= 0 && slot < g_macro_slot_count) {
+                int hk_vk = g_macro_slots[slot].hk_play_vk;
+                if (hk_vk > 0 && hk_vk < 256 && g_exclusive_keys[hk_vk]) {
+                    exclusive_macro_break = TRUE;
+                }
+            }
+            macro_handle_play_hotkey(slot);
+            if (exclusive_macro_break && macro_is_playing()) {
+                g_exclusive_macro_break_toggle = TRUE;
+            }
+        }
         return 0;
 
     case WM_PLAY_TOGGLE_SOUND:
@@ -3360,6 +3497,45 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_RBUTTONUP: {
+        int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+        if (!g_game_mode && !g_drag_active) {
+            int idx = keyboard_hittest(mx, my);
+            if (idx >= 0) {
+                int cmd;
+                HMENU hMenu;
+                POINT pt;
+                int vk = map_display_vk_for_click(g_krects[idx].vk);
+                if (!can_set_exclusive_for_vk(vk)) return 0;
+                hMenu = CreatePopupMenu();
+                if (g_exclusive_keys[vk])
+                    AppendMenuW(hMenu, MF_STRING, IDM_KB_EXCLUSIVE_CLEAR, L"取消独占模式");
+                else
+                    AppendMenuW(hMenu, MF_STRING, IDM_KB_EXCLUSIVE_SET, L"设为独占模式");
+                pt.x = mx; pt.y = my;
+                ClientToScreen(hwnd, &pt);
+                SetForegroundWindow(hwnd);
+                cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
+                DestroyMenu(hMenu);
+                if (cmd == IDM_KB_EXCLUSIVE_SET) {
+                    if (!g_exclusive_keys[vk]) {
+                        g_exclusive_keys[vk] = TRUE;
+                        save_config();
+                        InvalidateRect(hwnd, NULL, TRUE);
+                    }
+                } else if (cmd == IDM_KB_EXCLUSIVE_CLEAR) {
+                    if (g_exclusive_keys[vk]) {
+                        g_exclusive_keys[vk] = FALSE;
+                        save_config();
+                        InvalidateRect(hwnd, NULL, TRUE);
+                    }
+                }
+                return 0;
+            }
+        }
+        break;
+    }
+
     case WM_CTLCOLORSTATIC: {
         HDC hdcCtl = (HDC)wp;
         SetBkColor(hdcCtl, RGB(255,255,255));
@@ -3376,6 +3552,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_CLOSE:
         g_active = FALSE;
+        g_exclusive_macro_break_toggle = FALSE;
         if (g_rthread) { WaitForSingleObject(g_rthread,2000); CloseHandle(g_rthread); g_rthread=NULL; }
         release_toggled();
         if (g_game_mode) { RECT gr; GetWindowRect(hwnd,&gr); g_game_x=gr.left; g_game_y=gr.top; g_game_w=gr.right-gr.left; g_game_h=gr.bottom-gr.top; }
