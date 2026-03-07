@@ -147,6 +147,7 @@ static BOOL load_interception_dll(void) {
 #define IDC_BTN_RENAME_CONFIG 136
 #define IDC_EDIT_CONFIG_NAME 137
 #define IDC_CHK_TOGGLE_SOUND 138
+#define IDC_CHK_WASD_STABLE  140
 #define IDC_SLD_SOUND_VOL 1390
 #define IDC_SLD_TOGSND_VOL 1391
 #define IDM_GM_TOGGLE      200
@@ -231,6 +232,7 @@ static BOOL  g_swap_enabled    = FALSE;
 static BOOL  g_swap_no_start  = FALSE;
 static BOOL  g_curwin_only    = FALSE;
 static BOOL  g_skill_flicker  = FALSE;
+static BOOL  g_wasd_stable_mode = FALSE;
 static WCHAR g_cfg_name[MAX_PATH] = L"config.json";
 static int   g_key_swap[256];
 static BOOL  g_sound_open_ready = FALSE;
@@ -259,6 +261,7 @@ static HWND g_chk_keylock, g_chk_turbo, g_chk_pause_hold, g_chk_macro_active, g_
 static HWND g_chk_swap, g_chk_swap_nostart;
 static HWND g_chk_curwin_only;
 static HWND g_chk_skill_flicker;
+static HWND g_chk_wasd_stable;
 static HWND g_btn_toggle_sound;
 static HWND g_combo_config;
 static HWND g_btn_new_config;
@@ -348,6 +351,8 @@ static volatile ActiveSlot g_aslots[MAX_ACTIVE];
 static volatile int        g_active_count = 0;
 static volatile LONG       g_pps = 0;
 LARGE_INTEGER       g_qpc_freq;
+static volatile LONG g_wasd_down_state[4] = {0, 0, 0, 0};
+static volatile LONG g_wasd_down_count = 0;
 
 static void active_add_ex(int kid, int cfg_vk, BOOL is_mouse, BOOL from_swap, unsigned short mouse_dn, unsigned short mouse_up) {
     EnterCriticalSection(&g_cs_active);
@@ -604,8 +609,8 @@ void save_config(void) {
     SCFG("  \"game_x\": %d, \"game_y\": %d, \"game_w\": %d, \"game_h\": %d,\n",
          g_game_x, g_game_y, g_game_w, g_game_h);
     SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
-    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"toggle_sound_enabled\": %d,\n  \"global_sound_volume\": %d,\n  \"toggle_sound_volume\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n  \"curwin_only\": %d,\n  \"skill_flicker\": %d,\n",
-         g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_toggle_sound_enabled ? 1 : 0, g_global_sound_volume, g_toggle_sound_volume, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0, g_curwin_only ? 1 : 0, g_skill_flicker ? 1 : 0);
+    SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"toggle_sound_enabled\": %d,\n  \"global_sound_volume\": %d,\n  \"toggle_sound_volume\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n  \"curwin_only\": %d,\n  \"skill_flicker\": %d,\n  \"wasd_stable_mode\": %d,\n",
+         g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_toggle_sound_enabled ? 1 : 0, g_global_sound_volume, g_toggle_sound_volume, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0, g_curwin_only ? 1 : 0, g_skill_flicker ? 1 : 0, g_wasd_stable_mode ? 1 : 0);
     SCFG("  \"gaiyi\": %d,\n", g_gaiyi_value);
     SCFG("  \"key_swaps\": [%s", "");
     {
@@ -691,6 +696,7 @@ static void load_config(void) {
     p = strstr(buf, "\"swap_no_start\""); if (p) { p = strchr(p, ':'); if (p) g_swap_no_start = (atoi(p+1) != 0); }
     p = strstr(buf, "\"curwin_only\""); if (p) { p = strchr(p, ':'); if (p) g_curwin_only = (atoi(p+1) != 0); }
     p = strstr(buf, "\"skill_flicker\""); if (p) { p = strchr(p, ':'); if (p) g_skill_flicker = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"wasd_stable_mode\""); if (p) { p = strchr(p, ':'); if (p) g_wasd_stable_mode = (atoi(p+1) != 0); }
     p = strstr(buf, "\"gaiyi\""); if (p) { p = strchr(p, ':'); if (p) g_gaiyi_value = atoi(p+1); }
     if (g_gaiyi_value < 0) g_gaiyi_value = 0;
     if (g_gaiyi_value > 100) g_gaiyi_value = 100;
@@ -1213,6 +1219,44 @@ static unsigned short flags_from_vk(int vk) {
     return e0 ? INTERCEPTION_KEY_E0 : 0;
 }
 
+static int wasd_index_from_vk(int vk) {
+    switch (vk) {
+    case 'W': return 0;
+    case 'A': return 1;
+    case 'S': return 2;
+    case 'D': return 3;
+    default: return -1;
+    }
+}
+
+static void clear_wasd_down_state(void) {
+    for (int i = 0; i < 4; i++) InterlockedExchange(&g_wasd_down_state[i], 0);
+    InterlockedExchange(&g_wasd_down_count, 0);
+}
+
+static void on_wasd_key_transition(int vk, BOOL is_down) {
+    int wi = wasd_index_from_vk(vk);
+    if (wi < 0) return;
+    if (is_down) {
+        LONG prev = InterlockedExchange(&g_wasd_down_state[wi], 1);
+        if (!prev) InterlockedIncrement(&g_wasd_down_count);
+    } else {
+        LONG prev = InterlockedExchange(&g_wasd_down_state[wi], 0);
+        if (prev) {
+            LONG now = InterlockedDecrement(&g_wasd_down_count);
+            if (now < 0) InterlockedExchange(&g_wasd_down_count, 0);
+        }
+    }
+}
+
+static BOOL wasd_stable_active_now(void) {
+    return (g_wasd_stable_mode && InterlockedCompareExchange(&g_wasd_down_count, 0, 0) > 0);
+}
+
+int main_get_wasd_stable_extra_delay_ms(void) {
+    return wasd_stable_active_now() ? 30 : 0;
+}
+
 static DWORD WINAPI intercept_proc(LPVOID p) {
     (void)p;
     interception_set_filter(g_ctx, interception_is_keyboard, INTERCEPTION_FILTER_KEY_ALL);
@@ -1378,6 +1422,9 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                     me.mouse_x = 0; me.mouse_y = 0;
                     QueryPerformanceCounter(&me.timestamp);
                     macro_push_event(&me);
+                }
+                if (src_vk > 0 && src_vk < 256) {
+                    on_wasd_key_transition(src_vk, !(ks->state & INTERCEPTION_KEY_UP));
                 }
             }
         } else if (interception_is_mouse(dev)) {
@@ -1608,6 +1655,7 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
 
     while (g_active) {
         int cnt, mode, delay, i;
+        int effective_delay;
         BOOL any_sent = FALSE;
         EnterCriticalSection(&g_cs_active);
         cnt = g_active_count;
@@ -1624,6 +1672,9 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
         LeaveCriticalSection(&g_cs_active);
         if (cnt == 0) { Sleep(1); continue; }
         mode = g_mode; delay = g_delay;
+        effective_delay = delay;
+        if (wasd_stable_active_now() && effective_delay < 30000)
+            effective_delay = 30000;
         BOOL pause_toggled = FALSE;
         BOOL pause_nonexclusive_toggled = FALSE;
         BOOL has_exclusive_toggle = FALSE;
@@ -1731,7 +1782,7 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             }
         }
         if (!any_sent) { Sleep(1); continue; }
-        interruptible_sleep_us(g_turbo ? (delay<1?1:delay) : (delay<1000?1000:delay));
+        interruptible_sleep_us(g_turbo ? (effective_delay<1?1:effective_delay) : (effective_delay<1000?1000:effective_delay));
     }
     InterlockedExchange(&g_pps, 0); timeEndPeriod(1); return 0;
 }
@@ -1874,11 +1925,13 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
     if (on) {
         if (g_active) return;
         if (!g_key_lock && reset_state) release_toggled();
+        clear_wasd_down_state();
         g_active = TRUE;
         g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
         if (with_sound) play_global_sound(TRUE);
     } else {
         if (!g_active) {
+            clear_wasd_down_state();
             InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
             g_exclusive_macro_break_toggle = FALSE;
             release_intercepted_hotkeys();
@@ -1886,6 +1939,7 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
             return;
         }
         g_active = FALSE;
+        clear_wasd_down_state();
         if (g_rthread) { WaitForSingleObject(g_rthread,500); CloseHandle(g_rthread); g_rthread=NULL; }
         release_intercepted_hotkeys();
         if (stop_macro_with_global) macro_stop_all();
@@ -2221,6 +2275,7 @@ static void sync_ui_from_loaded_config(HWND hwnd) {
     SendMessageW(g_chk_swap_nostart, BM_SETCHECK, g_swap_no_start ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_chk_curwin_only, BM_SETCHECK, g_curwin_only ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_chk_skill_flicker, BM_SETCHECK, g_skill_flicker ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_chk_wasd_stable) SendMessageW(g_chk_wasd_stable, BM_SETCHECK, g_wasd_stable_mode ? BST_CHECKED : BST_UNCHECKED, 0);
     update_toggle_sound_btn();
     if (g_sld_sound_vol) SendMessageW(g_sld_sound_vol, TBM_SETPOS, TRUE, g_global_sound_volume);
     if (g_sld_togsnd_vol) SendMessageW(g_sld_togsnd_vol, TBM_SETPOS, TRUE, g_toggle_sound_volume);
@@ -2809,6 +2864,11 @@ static void create_controls(HWND hwnd) {
     SendMessageW(g_chk_skill_flicker, WM_SETFONT, (WPARAM)hf, TRUE);
     if (g_skill_flicker) SendMessageW(g_chk_skill_flicker, BM_SETCHECK, BST_CHECKED, 0);
     y += 24;
+    g_chk_wasd_stable = CreateWindowW(L"BUTTON", L"WASD \x8F93\x5165\x7A33\x5B9A\x6A21\x5F0F",
+        WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+5, y, 220, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_WASD_STABLE, NULL, NULL);
+    SendMessageW(g_chk_wasd_stable, WM_SETFONT, (WPARAM)hf, TRUE);
+    if (g_wasd_stable_mode) SendMessageW(g_chk_wasd_stable, BM_SETCHECK, BST_CHECKED, 0);
+    y += 24;
 
     g_lbl_status = make_label(hwnd, IDC_LABEL_STATUS, L"", LP_X, y, 84, 18, 0);
     SendMessageW(g_lbl_status, WM_SETFONT, (WPARAM)hf, TRUE);
@@ -3244,6 +3304,12 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             save_config();
             break;
         }
+        case IDC_CHK_WASD_STABLE: {
+            g_wasd_stable_mode = (SendMessageW(g_chk_wasd_stable, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (!g_wasd_stable_mode) clear_wasd_down_state();
+            save_config();
+            break;
+        }
         case IDC_CHK_PAUSE_HOLD: {
             BOOL want = (SendMessageW(g_chk_pause_hold, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (want) {
@@ -3552,6 +3618,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_CLOSE:
         g_active = FALSE;
+        clear_wasd_down_state();
         g_exclusive_macro_break_toggle = FALSE;
         if (g_rthread) { WaitForSingleObject(g_rthread,2000); CloseHandle(g_rthread); g_rthread=NULL; }
         release_toggled();
@@ -3575,6 +3642,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI);
+        clear_wasd_down_state();
         clear_hotkey_registration(hwnd);
         macro_unregister_play_hotkeys(hwnd);
         release_toggle_sounds();
@@ -3641,7 +3709,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     RegisterClassW(&wc);
 
     int cw = KB_X + 96*KU/4 + 10;
-    int ch = 434;
+    int ch = 458;
     RECT wr = {0, 0, cw, ch};
     AdjustWindowRectEx(&wr, WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX, FALSE, 0);
     int ww = wr.right - wr.left, wh = wr.bottom - wr.top;

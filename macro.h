@@ -63,5 +63,6 @@ BOOL macro_is_press_mode_playing(void);
 void macro_on_hotkey_transition(int vk, BOOL is_down);
 void macro_save_config_to(char *buf, int *pos, int rem);
 void macro_load_config_from(const char *json);
+int main_get_wasd_stable_extra_delay_ms(void);
 
 #endif

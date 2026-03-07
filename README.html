@@ -71,6 +71,7 @@
   <li>修复了宏录制无法记录鼠标滚轮的问题。</li>
   <li>修复了勾选复选框后，宏在按压模式下无法打断 Toggle 按键的问题。</li>
   <li>新增独占模式。</li>
+  <li>新增 WASD 稳定输入模式（WASD 按下时，连发与宏循环自动降速至稳定节奏）。</li>
 </ul>
 
 <hr>
@@ -171,6 +172,14 @@
 <h3>4. 开启连发</h3>
 <p>按下 <strong>F1</strong>（默认热键）开启连发，再按 <strong>F1</strong> 关闭。开启/关闭时会有音效提示。</p>
 <p>状态栏会实时显示：连发状态、当前连发中的按键列表、每秒按键次数（PPS）。</p>
+
+<h3>5. WASD 稳定输入模式</h3>
+<p>勾选 <strong>「WASD 输入稳定模式」</strong> 后：</p>
+<ul>
+  <li>只要检测到 <code>W/A/S/D</code> 任一键按下，Hold/Toggle/Hybrid 的连发间隔会临时限制为不低于 <strong>30ms</strong></li>
+  <li>同时，宏回放（按压模式与非按压模式）在每轮循环结束后会额外等待 <strong>30ms</strong></li>
+  <li>当 <code>W/A/S/D</code> 全部弹起后，连发与宏回放自动恢复原设定速率</li>
+</ul>
 
 <hr>
 

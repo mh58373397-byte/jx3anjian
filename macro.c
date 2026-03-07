@@ -616,6 +616,10 @@ static DWORD WINAPI play_thread_proc(LPVOID p) {
             }
         }
         Sleep(1);
+        {
+            int extra_ms = main_get_wasd_stable_extra_delay_ms();
+            if (extra_ms > 0) play_sleep_ms(extra_ms);
+        }
         loop_idx++;
     }
     reset_playback_pressed_inputs();
