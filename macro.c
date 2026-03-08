@@ -33,6 +33,14 @@ extern PFN_is_keyboard       pfn_is_keyboard;
 extern PFN_is_mouse          pfn_is_mouse;
 extern PFN_get_hardware_id   pfn_get_hardware_id;
 
+extern int g_driver_mode;
+enum { DRV_DD_MACRO = 0 };
+extern void drv_send_key_vk(int vk, BOOL down);
+extern void drv_send_key_scan(unsigned short scan, unsigned short flags_dn, BOOL down, InterceptionDevice dev);
+extern void drv_send_mouse_btn(unsigned short dd_btn_flag);
+extern void drv_send_mouse_move_abs(int x, int y);
+extern void drv_send_mouse_wheel(BOOL up);
+
 /* ================================================================== */
 /*                        CONTROL IDS                                  */
 /* ================================================================== */
@@ -494,6 +502,7 @@ static int parse_script(const WCHAR *text, MacroStep *cmds, int max_cmds) {
 /* ================================================================== */
 
 static InterceptionDevice find_keyboard_device(void) {
+    if (g_driver_mode != 1) return INTERCEPTION_KEYBOARD(0);
     if (!g_ctx) return 0;
     wchar_t hwid[256];
     for (int i = 0; i < INTERCEPTION_MAX_KEYBOARD; i++) {
@@ -504,6 +513,7 @@ static InterceptionDevice find_keyboard_device(void) {
 }
 
 static InterceptionDevice find_mouse_device(void) {
+    if (g_driver_mode != 1) return INTERCEPTION_MOUSE(0);
     if (!g_ctx) return 0;
     wchar_t hwid[256];
     for (int i = 0; i < INTERCEPTION_MAX_MOUSE; i++) {
@@ -530,32 +540,21 @@ static void play_sleep_ms(int ms) {
 }
 
 static void reset_playback_pressed_inputs(void) {
-    InterceptionDevice kb_dev = find_keyboard_device();
-    InterceptionDevice ms_dev = find_mouse_device();
-    if (kb_dev && g_ctx) {
+    if (g_drv_ok) {
         for (int sc = 0; sc < 256; sc++) {
             if (!s_play_key_down[sc]) continue;
-            {
-                InterceptionKeyStroke ks;
-                ks.code = (unsigned short)sc;
-                ks.state = INTERCEPTION_KEY_UP;
-                ks.information = 0;
-                pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
-            }
+            drv_send_key_scan((unsigned short)sc, 0, FALSE, find_keyboard_device());
             s_play_key_down[sc] = FALSE;
+        }
+        if (s_play_mouse_down_mask) {
+            if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN)   drv_send_mouse_btn(INTERCEPTION_MOUSE_LEFT_BUTTON_UP);
+            if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN)  drv_send_mouse_btn(INTERCEPTION_MOUSE_RIGHT_BUTTON_UP);
+            if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN) drv_send_mouse_btn(INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP);
+            if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_4_DOWN)      drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_4_UP);
+            if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_5_UP);
         }
     } else {
         memset(s_play_key_down, 0, sizeof(s_play_key_down));
-    }
-    if (ms_dev && g_ctx && s_play_mouse_down_mask) {
-        InterceptionMouseStroke ms;
-        memset(&ms, 0, sizeof(ms));
-        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN)   ms.state |= INTERCEPTION_MOUSE_LEFT_BUTTON_UP;
-        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN)  ms.state |= INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;
-        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN) ms.state |= INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;
-        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_4_DOWN)      ms.state |= INTERCEPTION_MOUSE_BUTTON_4_UP;
-        if (s_play_mouse_down_mask & INTERCEPTION_MOUSE_BUTTON_5_DOWN)      ms.state |= INTERCEPTION_MOUSE_BUTTON_5_UP;
-        if (ms.state) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
     }
     s_play_mouse_down_mask = 0;
 }
@@ -563,56 +562,39 @@ static void reset_playback_pressed_inputs(void) {
 static DWORD WINAPI play_thread_proc(LPVOID p) {
     (void)p;
     InterceptionDevice kb_dev = find_keyboard_device();
-    InterceptionDevice ms_dev = find_mouse_device();
     int loops = s_play_loop_total, loop_idx = 0;
     while (s_macro_playing && (loops == 0 || loop_idx < loops)) {
+        if (g_driver_mode == DRV_DD_MACRO && GetForegroundWindow() == g_hwnd) {
+            Sleep(50); continue;
+        }
         s_play_loop_cur = loop_idx + 1;
         for (int i = 0; i < s_play_cmd_count && s_macro_playing; i++) {
             MacroStep *cmd = &s_play_cmds[i];
             switch (cmd->cmd) {
-            case MC_KEY_DOWN: {
-                InterceptionKeyStroke ks; ks.code = cmd->scan; ks.state = INTERCEPTION_KEY_DOWN; ks.information = 0;
-                if (kb_dev && g_ctx) pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
+            case MC_KEY_DOWN:
+                drv_send_key_scan(cmd->scan, 0, TRUE, kb_dev);
                 s_play_key_down[cmd->scan & 0xFF] = TRUE;
-                break; }
-            case MC_KEY_UP: {
-                InterceptionKeyStroke ks; ks.code = cmd->scan; ks.state = INTERCEPTION_KEY_UP; ks.information = 0;
-                if (kb_dev && g_ctx) pfn_send(g_ctx, kb_dev, (InterceptionStroke*)&ks, 1);
+                break;
+            case MC_KEY_UP:
+                drv_send_key_scan(cmd->scan, 0, FALSE, kb_dev);
                 s_play_key_down[cmd->scan & 0xFF] = FALSE;
-                break; }
+                break;
             case MC_DELAY: play_sleep_ms(cmd->delay_ms); break;
-            case MC_MOUSE_MOVE: {
-                int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
-                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
-                ms.flags = INTERCEPTION_MOUSE_MOVE_ABSOLUTE;
-                ms.x = (int)((long long)cmd->x * 65535 / sx);
-                ms.y = (int)((long long)cmd->y * 65535 / sy);
-                if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
-                break; }
-            case MC_MOUSE_LDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break; }
-            case MC_MOUSE_LUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_LEFT_BUTTON_UP;   if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break; }
-            case MC_MOUSE_RDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break; }
-            case MC_MOUSE_RUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_RIGHT_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break; }
-            case MC_MOUSE_MDOWN: { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN;if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break; }
-            case MC_MOUSE_MUP:   { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP;  if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break; }
-            case MC_MOUSE_X1DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_4_DOWN; break; }
-            case MC_MOUSE_X1UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_4_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_4_DOWN; break; }
-            case MC_MOUSE_X2DOWN:{ InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_DOWN;    if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_5_DOWN; break; }
-            case MC_MOUSE_X2UP:  { InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms)); ms.state=INTERCEPTION_MOUSE_BUTTON_5_UP;      if(ms_dev&&g_ctx) pfn_send(g_ctx,ms_dev,(InterceptionStroke*)&ms,1); s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_5_DOWN; break; }
-            case MC_MOUSE_WHEEL_UP: {
-                InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms));
-                ms.state = INTERCEPTION_MOUSE_WHEEL;
-                ms.rolling = WHEEL_DELTA;
-                if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
+            case MC_MOUSE_MOVE:
+                drv_send_mouse_move_abs(cmd->x, cmd->y);
                 break;
-            }
-            case MC_MOUSE_WHEEL_DOWN: {
-                InterceptionMouseStroke ms; memset(&ms,0,sizeof(ms));
-                ms.state = INTERCEPTION_MOUSE_WHEEL;
-                ms.rolling = (short)-WHEEL_DELTA;
-                if (ms_dev && g_ctx) pfn_send(g_ctx, ms_dev, (InterceptionStroke*)&ms, 1);
-                break;
-            }
+            case MC_MOUSE_LDOWN:  drv_send_mouse_btn(INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN);   s_play_mouse_down_mask |= INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break;
+            case MC_MOUSE_LUP:    drv_send_mouse_btn(INTERCEPTION_MOUSE_LEFT_BUTTON_UP);     s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN; break;
+            case MC_MOUSE_RDOWN:  drv_send_mouse_btn(INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN);  s_play_mouse_down_mask |= INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break;
+            case MC_MOUSE_RUP:    drv_send_mouse_btn(INTERCEPTION_MOUSE_RIGHT_BUTTON_UP);    s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN; break;
+            case MC_MOUSE_MDOWN:  drv_send_mouse_btn(INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN); s_play_mouse_down_mask |= INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break;
+            case MC_MOUSE_MUP:    drv_send_mouse_btn(INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP);   s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN; break;
+            case MC_MOUSE_X1DOWN: drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_4_DOWN);      s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_4_DOWN; break;
+            case MC_MOUSE_X1UP:   drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_4_UP);        s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_4_DOWN; break;
+            case MC_MOUSE_X2DOWN: drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_5_DOWN);      s_play_mouse_down_mask |= INTERCEPTION_MOUSE_BUTTON_5_DOWN; break;
+            case MC_MOUSE_X2UP:   drv_send_mouse_btn(INTERCEPTION_MOUSE_BUTTON_5_UP);        s_play_mouse_down_mask &= (unsigned short)~INTERCEPTION_MOUSE_BUTTON_5_DOWN; break;
+            case MC_MOUSE_WHEEL_UP:   drv_send_mouse_wheel(TRUE);  break;
+            case MC_MOUSE_WHEEL_DOWN: drv_send_mouse_wheel(FALSE); break;
             }
         }
         Sleep(1);
@@ -644,8 +626,8 @@ static void stop_playback(void) {
 
 static void start_playback(void) {
     if (s_macro_playing || g_macro_recording) return;
-    if (!g_drv_ok || !g_ctx) {
-        if (s_macro_hwnd) MessageBoxW(s_macro_hwnd, L"Interception \u9A71\u52A8\u672A\u5C31\u7EEA", L"\u9519\u8BEF", MB_ICONERROR);
+    if (!g_drv_ok) {
+        if (s_macro_hwnd) MessageBoxW(s_macro_hwnd, L"\x9A71\x52A8\x672A\x5C31\x7EEA", L"\x9519\x8BEF", MB_ICONERROR);
         return;
     }
     if (!s_edit) return;
@@ -673,7 +655,7 @@ static void start_playback(void) {
 
 static void start_playback_slot(int slot, BOOL force_infinite) {
     if (s_macro_playing || g_macro_recording) return;
-    if (!g_drv_ok || !g_ctx) return;
+    if (!g_drv_ok) return;
     if (slot < 0 || slot >= g_macro_slot_count) return;
     MacroSlot *ms = &g_macro_slots[slot];
     if (!ms->script || ms->script[0] == 0) return;

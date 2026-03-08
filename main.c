@@ -22,6 +22,13 @@
 #pragma comment(lib, "comctl32.lib")
 
 /* ================================================================== */
+/*                      DRIVER MODE                                    */
+/* ================================================================== */
+
+enum DriverMode { DRV_DD = 0, DRV_INTERCEPTION = 1 };
+int g_driver_mode = DRV_DD;
+
+/* ================================================================== */
 /*          DYNAMIC LOADING - interception.dll from resource           */
 /* ================================================================== */
 
@@ -56,6 +63,29 @@ PFN_is_mouse           pfn_is_mouse;
 #define interception_is_mouse          pfn_is_mouse
 
 static HMODULE g_dll = NULL;
+
+/* ================================================================== */
+/*          DYNAMIC LOADING - DD64.dll from resource                    */
+/* ================================================================== */
+
+typedef int (WINAPI *PFN_DD_btn)(int btn);
+typedef int (WINAPI *PFN_DD_whl)(int whl);
+typedef int (WINAPI *PFN_DD_key)(int keycode, int flag);
+typedef int (WINAPI *PFN_DD_mov)(int x, int y);
+typedef int (WINAPI *PFN_DD_str)(char *str);
+typedef int (WINAPI *PFN_DD_todc)(int vk);
+typedef int (WINAPI *PFN_DD_movR)(int dx, int dy);
+
+static PFN_DD_btn   pfn_DD_btn;
+static PFN_DD_whl   pfn_DD_whl;
+static PFN_DD_key   pfn_DD_key;
+static PFN_DD_mov   pfn_DD_mov;
+static PFN_DD_str   pfn_DD_str;
+static PFN_DD_todc  pfn_DD_todc;
+static PFN_DD_movR  pfn_DD_movR;
+
+static HMODULE g_dd_dll = NULL;
+static WCHAR g_dd_dll_path[MAX_PATH];
 
 /* ================================================================== */
 /*                       RESOURCE EXTRACTION                           */
@@ -99,6 +129,159 @@ static BOOL load_interception_dll(void) {
     return pfn_create_context && pfn_destroy_context && pfn_set_filter &&
            pfn_get_hardware_id && pfn_wait_with_timeout && pfn_receive &&
            pfn_send && pfn_is_keyboard && pfn_is_mouse;
+}
+
+static BOOL load_dd_dll(void) {
+    WCHAR tempDir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempDir);
+    wsprintfW(g_dd_dll_path, L"%sdd64_autokey.dll", tempDir);
+    extract_resource(IDR_DD64_DLL, g_dd_dll_path);
+    g_dd_dll = LoadLibraryW(g_dd_dll_path);
+    if (!g_dd_dll) return FALSE;
+    pfn_DD_btn   = (PFN_DD_btn)  GetProcAddress(g_dd_dll, "DD_btn");
+    pfn_DD_whl   = (PFN_DD_whl)  GetProcAddress(g_dd_dll, "DD_whl");
+    pfn_DD_key   = (PFN_DD_key)  GetProcAddress(g_dd_dll, "DD_key");
+    pfn_DD_mov   = (PFN_DD_mov)  GetProcAddress(g_dd_dll, "DD_mov");
+    pfn_DD_str   = (PFN_DD_str)  GetProcAddress(g_dd_dll, "DD_str");
+    pfn_DD_todc  = (PFN_DD_todc) GetProcAddress(g_dd_dll, "DD_todc");
+    pfn_DD_movR  = (PFN_DD_movR) GetProcAddress(g_dd_dll, "DD_movR");
+    if (!(pfn_DD_btn && pfn_DD_whl && pfn_DD_key && pfn_DD_mov &&
+          pfn_DD_str && pfn_DD_todc && pfn_DD_movR)) {
+        FreeLibrary(g_dd_dll); g_dd_dll = NULL;
+        return FALSE;
+    }
+    int st = pfn_DD_btn(0);
+    return (st == 1);
+}
+
+static void unload_dd_dll(void) {
+    if (g_dd_dll) { FreeLibrary(g_dd_dll); g_dd_dll = NULL; }
+    DeleteFileW(g_dd_dll_path);
+    pfn_DD_btn = NULL; pfn_DD_whl = NULL; pfn_DD_key = NULL;
+    pfn_DD_mov = NULL; pfn_DD_str = NULL; pfn_DD_todc = NULL; pfn_DD_movR = NULL;
+}
+
+/* ================================================================== */
+/*                 DRIVER ABSTRACTION LAYER                            */
+/* ================================================================== */
+
+#define MID_LBUTTON   0x200
+#define MID_RBUTTON   0x201
+#define MID_MBUTTON   0x202
+#define MID_XBUTTON1  0x203
+#define MID_XBUTTON2  0x204
+#define MAX_KID       0x205
+
+static volatile LONG g_dd_skip_kid[MAX_KID];
+
+static int kid_to_vk(int kid);
+static int vk_to_logic_kid(int vk);
+static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0);
+static InterceptionDevice pick_keyboard_out_dev(void);
+static InterceptionDevice pick_mouse_out_dev(void);
+static int mouse_flag_to_kid(unsigned short flag);
+
+extern InterceptionContext g_ctx;
+
+void drv_send_key_vk(int vk, BOOL down) {
+    if (g_driver_mode == DRV_DD && pfn_DD_key && pfn_DD_todc) {
+        int ddcode = pfn_DD_todc(vk);
+        if (ddcode > 0) {
+            int kid = vk_to_logic_kid(vk);
+            if (kid >= 0 && kid < MAX_KID)
+                InterlockedIncrement(&g_dd_skip_kid[kid]);
+            pfn_DD_key(ddcode, down ? 1 : 2);
+        }
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
+        InterceptionDevice dev = pick_keyboard_out_dev();
+        if (!dev) return;
+        unsigned short sc; BOOL e0;
+        vk_to_sc_e0(vk, &sc, &e0);
+        InterceptionKeyStroke ks;
+        ks.code = sc;
+        ks.state = (e0 ? INTERCEPTION_KEY_E0 : 0) | (down ? 0 : INTERCEPTION_KEY_UP);
+        ks.information = 0;
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ks, 1);
+    }
+}
+
+void drv_send_key_scan(unsigned short scan, unsigned short flags_dn, BOOL down, InterceptionDevice dev) {
+    if (g_driver_mode == DRV_DD && pfn_DD_key && pfn_DD_todc) {
+        int kid = (int)(scan | ((flags_dn & INTERCEPTION_KEY_E0) ? 0x100 : 0));
+        int vk = kid_to_vk(kid);
+        if (vk > 0) {
+            int ddcode = pfn_DD_todc(vk);
+            if (ddcode > 0) {
+                if (kid >= 0 && kid < MAX_KID)
+                    InterlockedIncrement(&g_dd_skip_kid[kid]);
+                pfn_DD_key(ddcode, down ? 1 : 2);
+            }
+        }
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send && dev) {
+        InterceptionKeyStroke ks;
+        ks.code = scan;
+        ks.state = flags_dn | (down ? 0 : INTERCEPTION_KEY_UP);
+        ks.information = 0;
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ks, 1);
+    }
+}
+
+void drv_send_mouse_btn(unsigned short dd_btn_flag) {
+    if (g_driver_mode == DRV_DD && pfn_DD_btn) {
+        int kid = mouse_flag_to_kid(dd_btn_flag);
+        if (kid >= 0 && kid < MAX_KID)
+            InterlockedIncrement(&g_dd_skip_kid[kid]);
+        pfn_DD_btn((int)dd_btn_flag);
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
+        InterceptionDevice dev = pick_mouse_out_dev();
+        if (!dev) return;
+        InterceptionMouseStroke ms;
+        memset(&ms, 0, sizeof(ms));
+        ms.state = dd_btn_flag;
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ms, 1);
+    }
+}
+
+void drv_send_mouse_btn_on_dev(unsigned short state, InterceptionDevice dev) {
+    if (g_driver_mode == DRV_DD && pfn_DD_btn) {
+        int kid = mouse_flag_to_kid(state);
+        if (kid >= 0 && kid < MAX_KID)
+            InterlockedIncrement(&g_dd_skip_kid[kid]);
+        pfn_DD_btn((int)state);
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send && dev) {
+        InterceptionMouseStroke ms;
+        memset(&ms, 0, sizeof(ms));
+        ms.state = state;
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ms, 1);
+    }
+}
+
+void drv_send_mouse_move_abs(int x, int y) {
+    if (g_driver_mode == DRV_DD && pfn_DD_mov) {
+        pfn_DD_mov(x, y);
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
+        InterceptionDevice dev = pick_mouse_out_dev();
+        if (!dev) return;
+        int sx = GetSystemMetrics(SM_CXSCREEN), sy = GetSystemMetrics(SM_CYSCREEN);
+        InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
+        ms.flags = INTERCEPTION_MOUSE_MOVE_ABSOLUTE;
+        ms.x = (int)((long long)x * 65535 / sx);
+        ms.y = (int)((long long)y * 65535 / sy);
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ms, 1);
+    }
+}
+
+void drv_send_mouse_wheel(BOOL up) {
+    if (g_driver_mode == DRV_DD && pfn_DD_whl) {
+        pfn_DD_whl(up ? 1 : 2);
+    } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
+        InterceptionDevice dev = pick_mouse_out_dev();
+        if (!dev) return;
+        InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
+        ms.state = INTERCEPTION_MOUSE_WHEEL;
+        ms.rolling = up ? WHEEL_DELTA : (short)-WHEEL_DELTA;
+        pfn_send(g_ctx, dev, (InterceptionStroke *)&ms, 1);
+    }
 }
 
 /* ================================================================== */
@@ -159,12 +342,6 @@ static BOOL load_interception_dll(void) {
 #define WM_PLAY_TOGGLE_SOUND (WM_APP + 10)
 
 #define KID(code, st) ((int)((code) & 0xFF) | (((st) & INTERCEPTION_KEY_E0) ? 0x100 : 0))
-#define MID_LBUTTON   0x200
-#define MID_RBUTTON   0x201
-#define MID_MBUTTON   0x202
-#define MID_XBUTTON1  0x203
-#define MID_XBUTTON2  0x204
-#define MAX_KID       0x205
 #define MODE_HOLD   0
 #define MODE_CUSTOM 1
 #define MODE_HYBRID 2
@@ -201,6 +378,7 @@ static BOOL  g_custom_keys[256];
 static BOOL  g_exclusive_keys[256];
 static volatile LONG g_exclusive_excluded_hold_count = 0;
 static volatile BOOL g_exclusive_macro_break_toggle = FALSE;
+static volatile LONG g_exclusive_toggle_owner_kid = -1;
 static BOOL  g_game_mode    = FALSE;
 static HHOOK g_kbhook       = NULL;
 static HHOOK g_mshook       = NULL;
@@ -254,6 +432,8 @@ static int   g_drag_dst_idx = -1;
 static BOOL  g_drag_active  = FALSE;
 
 static HWND g_lbl_driver, g_lbl_status, g_lbl_delay, g_lbl_speed;
+static HWND g_combo_driver;
+static HWND g_btn_install_drv;
 static HWND g_lbl_repeat, g_lbl_hkname, g_lbl_gmhkname;
 static HWND g_edit_delay;
 static HWND g_radio_hold, g_radio_toggle, g_radio_hybrid;
@@ -338,6 +518,7 @@ static int kid_to_vk(int kid);
 static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0);
 static InterceptionDevice pick_keyboard_out_dev(void);
 static BOOL sanitize_exclusive_conflicts(void);
+static void clear_other_exclusive_toggles(int keep_kid);
 
 #define MAX_ACTIVE 16
 typedef struct {
@@ -611,6 +792,7 @@ void save_config(void) {
     SCFG("  \"hk_toggle\": %d, \"hk_game\": %d,\n", g_hk_toggle_vk, g_hk_game_vk);
     SCFG("  \"key_lock\": %d,\n  \"turbo\": %d,\n  \"pause_toggle_on_hold\": %d,\n  \"macro_active\": %d,\n  \"macro_no_start\": %d,\n  \"sound_enabled\": %d,\n  \"toggle_sound_enabled\": %d,\n  \"global_sound_volume\": %d,\n  \"toggle_sound_volume\": %d,\n  \"swap_enabled\": %d,\n  \"swap_no_start\": %d,\n  \"curwin_only\": %d,\n  \"skill_flicker\": %d,\n  \"wasd_stable_mode\": %d,\n",
          g_key_lock ? 1 : 0, g_turbo ? 1 : 0, g_pause_toggle_on_hold ? 1 : 0, g_macro_active ? 1 : 0, g_macro_no_start ? 1 : 0, g_sound_enabled ? 1 : 0, g_toggle_sound_enabled ? 1 : 0, g_global_sound_volume, g_toggle_sound_volume, g_swap_enabled ? 1 : 0, g_swap_no_start ? 1 : 0, g_curwin_only ? 1 : 0, g_skill_flicker ? 1 : 0, g_wasd_stable_mode ? 1 : 0);
+    SCFG("  \"driver_mode\": %d,\n", g_driver_mode);
     SCFG("  \"gaiyi\": %d,\n", g_gaiyi_value);
     SCFG("  \"key_swaps\": [%s", "");
     {
@@ -697,6 +879,7 @@ static void load_config(void) {
     p = strstr(buf, "\"curwin_only\""); if (p) { p = strchr(p, ':'); if (p) g_curwin_only = (atoi(p+1) != 0); }
     p = strstr(buf, "\"skill_flicker\""); if (p) { p = strchr(p, ':'); if (p) g_skill_flicker = (atoi(p+1) != 0); }
     p = strstr(buf, "\"wasd_stable_mode\""); if (p) { p = strchr(p, ':'); if (p) g_wasd_stable_mode = (atoi(p+1) != 0); }
+    p = strstr(buf, "\"driver_mode\""); if (p) { p = strchr(p, ':'); if (p) { int dm = atoi(p+1); if (dm == 0 || dm == 1) g_driver_mode = dm; } }
     p = strstr(buf, "\"gaiyi\""); if (p) { p = strchr(p, ':'); if (p) g_gaiyi_value = atoi(p+1); }
     if (g_gaiyi_value < 0) g_gaiyi_value = 0;
     if (g_gaiyi_value > 100) g_gaiyi_value = 100;
@@ -925,6 +1108,20 @@ static BOOL sanitize_exclusive_conflicts(void) {
     return changed;
 }
 
+static void clear_other_exclusive_toggles(int keep_kid) {
+    for (int kid = 0; kid < MAX_KID; kid++) {
+        int vk;
+        if (kid == keep_kid) continue;
+        if (!g_toggled[kid]) continue;
+        vk = kid_to_vk(kid);
+        if (vk <= 0 || vk >= 256) continue;
+        if (!g_exclusive_keys[vk]) continue;
+        g_toggled[kid] = FALSE;
+        g_tdev[kid] = 0;
+        active_remove(kid);
+    }
+}
+
 static void vk_to_sc_e0(int vk, unsigned short *sc, BOOL *e0) {
     *e0 = FALSE;
     switch (vk) {
@@ -1089,6 +1286,22 @@ static int build_toggled_list(WCHAR *buf, int bufmax, int max_show) {
 /*                          THREADS                                    */
 /* ================================================================== */
 
+static int mouse_flag_to_kid(unsigned short flag) {
+    switch (flag) {
+    case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN:
+    case INTERCEPTION_MOUSE_LEFT_BUTTON_UP:     return MID_LBUTTON;
+    case INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN:
+    case INTERCEPTION_MOUSE_RIGHT_BUTTON_UP:    return MID_RBUTTON;
+    case INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN:
+    case INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP:   return MID_MBUTTON;
+    case INTERCEPTION_MOUSE_BUTTON_4_DOWN:
+    case INTERCEPTION_MOUSE_BUTTON_4_UP:        return MID_XBUTTON1;
+    case INTERCEPTION_MOUSE_BUTTON_5_DOWN:
+    case INTERCEPTION_MOUSE_BUTTON_5_UP:        return MID_XBUTTON2;
+    default: return -1;
+    }
+}
+
 static unsigned short mid_to_mouse_up(int mid) {
     switch (mid) {
     case MID_LBUTTON:  return INTERCEPTION_MOUSE_LEFT_BUTTON_UP;
@@ -1120,17 +1333,12 @@ static void send_toggled_keyups(void) {
 
 static void release_toggled(void) {
     for (int kid=0; kid<MAX_KID; kid++) {
-        if (g_toggled[kid] && g_tdev[kid] && g_drv_ok) {
+        if (g_toggled[kid] && g_drv_ok) {
             if (kid >= MID_LBUTTON && kid <= MID_XBUTTON2) {
-                InterceptionMouseStroke ms; memset(&ms, 0, sizeof(ms));
-                ms.state = mid_to_mouse_up(kid);
-                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&ms, 1);
+                drv_send_mouse_btn(mid_to_mouse_up(kid));
             } else {
-                InterceptionKeyStroke up_ks;
-                up_ks.code = (unsigned short)(kid & 0xFF);
-                up_ks.state = INTERCEPTION_KEY_UP | g_tflags[kid];
-                up_ks.information = 0;
-                interception_send(g_ctx, g_tdev[kid], (InterceptionStroke *)&up_ks, 1);
+                int vk = kid_to_vk(kid);
+                if (vk > 0) drv_send_key_vk(vk, FALSE);
             }
         }
     }
@@ -1142,18 +1350,12 @@ static void release_toggled(void) {
 }
 
 static void release_intercepted_hotkeys(void) {
-    InterceptionDevice out_kbd = pick_keyboard_out_dev();
-    if (out_kbd && g_drv_ok && g_ctx) {
+    if (g_drv_ok) {
         for (int kid = 0; kid < MAX_KID; kid++) {
             if (!g_macro_kbd_hk_down[kid]) continue;
             if (kid >= MID_LBUTTON && kid <= MID_XBUTTON2) continue;
-            {
-                InterceptionKeyStroke up_ks;
-                up_ks.code = (unsigned short)(kid & 0xFF);
-                up_ks.state = INTERCEPTION_KEY_UP | ((kid & 0x100) ? INTERCEPTION_KEY_E0 : 0);
-                up_ks.information = 0;
-                interception_send(g_ctx, out_kbd, (InterceptionStroke *)&up_ks, 1);
-            }
+            int vk = kid_to_vk(kid);
+            if (vk > 0) drv_send_key_vk(vk, FALSE);
         }
     }
     g_ihk_toggle_down = FALSE;
@@ -1387,8 +1589,14 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                         if (cfg_match) {
                             if (g_toggled[logic_kid]) {
                                 g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
+                                if ((LONG)logic_kid == InterlockedCompareExchange(&g_exclusive_toggle_owner_kid, -1, -1))
+                                    InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
                                 PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
                             } else {
+                                BOOL new_exclusive_toggle = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied);
+                                if (new_exclusive_toggle) {
+                                    clear_other_exclusive_toggles(logic_kid);
+                                }
                                 g_toggled[logic_kid]=TRUE; g_tdev[logic_kid]=logic_dev;
                                 if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
                                     unsigned short dn2, up2;
@@ -1398,6 +1606,8 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                                     g_tflags[logic_kid]=ks->state&(unsigned short)~INTERCEPTION_KEY_UP;
                                     active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
                                 }
+                                if (new_exclusive_toggle)
+                                    InterlockedExchange(&g_exclusive_toggle_owner_kid, logic_kid);
                                 PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
                             }
                         }
@@ -1551,8 +1761,14 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                         if (cfg_match) {
                             if (g_toggled[logic_kid]) {
                                 g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
+                                if ((LONG)logic_kid == InterlockedCompareExchange(&g_exclusive_toggle_owner_kid, -1, -1))
+                                    InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
                                 PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
                             } else {
+                                BOOL new_exclusive_toggle = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied);
+                                if (new_exclusive_toggle) {
+                                    clear_other_exclusive_toggles(logic_kid);
+                                }
                                 g_toggled[logic_kid]=TRUE; g_tdev[logic_kid]=logic_dev;
                                 if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
                                     unsigned short dn2, up2;
@@ -1562,6 +1778,8 @@ static DWORD WINAPI intercept_proc(LPVOID p) {
                                     g_tflags[logic_kid] = flags_from_vk(logic_vk);
                                     active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
                                 }
+                                if (new_exclusive_toggle)
+                                    InterlockedExchange(&g_exclusive_toggle_owner_kid, logic_kid);
                                 PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
                             }
                         }
@@ -1671,13 +1889,17 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
         }
         LeaveCriticalSection(&g_cs_active);
         if (cnt == 0) { Sleep(1); continue; }
+        if (g_driver_mode == DRV_DD && GetForegroundWindow() == g_hwnd) {
+            Sleep(50); continue;
+        }
         mode = g_mode; delay = g_delay;
         effective_delay = delay;
         if (wasd_stable_active_now() && effective_delay < 30000)
             effective_delay = 30000;
         BOOL pause_toggled = FALSE;
         BOOL pause_nonexclusive_toggled = FALSE;
-        BOOL has_exclusive_toggle = FALSE;
+        LONG exclusive_owner_kid = InterlockedCompareExchange(&g_exclusive_toggle_owner_kid, -1, -1);
+        BOOL owner_exclusive_toggle_on = FALSE;
         BOOL has_exclusive_hold = FALSE;
         BOOL pause_all_silent = (g_exclusive_excluded_hold_count > 0);
         if (g_exclusive_macro_break_toggle) {
@@ -1704,15 +1926,16 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             if (!is_exclusive_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap)) continue;
             toggle_allowed = should_toggle_key_for_input(vk, logic_vk_cfg, local_slots[i].from_swap);
             is_toggled_on = local_toggled[i] && toggle_allowed;
-            if (is_toggled_on) has_exclusive_toggle = TRUE;
+            if (is_toggled_on && (LONG)local_slots[i].kid == exclusive_owner_kid)
+                owner_exclusive_toggle_on = TRUE;
             if (is_held_on && (mode == MODE_HOLD || (mode == MODE_HYBRID && !is_toggled_on))) {
                 if (!is_excluded_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap))
                     has_exclusive_hold = TRUE;
             }
-            if (has_exclusive_toggle && has_exclusive_hold) break;
+            if (owner_exclusive_toggle_on && has_exclusive_hold) break;
         }
         if (has_exclusive_hold) pause_toggled = TRUE;
-        if (has_exclusive_toggle) pause_nonexclusive_toggled = TRUE;
+        if (owner_exclusive_toggle_on) pause_nonexclusive_toggled = TRUE;
         for (i = 0; i < cnt && g_active; i++) {
             int vk = local_slots[i].vk;
             int logic_vk_cfg = kid_to_vk(local_slots[i].kid);
@@ -1735,6 +1958,8 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             if (pause_all_silent) continue;
             if (pause_toggled && is_toggled_on && !is_held_on) continue;
             is_exclusive_slot = is_exclusive_for_slot(vk, logic_vk_cfg, local_slots[i].from_swap);
+            if (is_toggled_on && is_exclusive_slot &&
+                ((LONG)local_slots[i].kid != exclusive_owner_kid || !owner_exclusive_toggle_on)) continue;
             if (pause_nonexclusive_toggled && is_toggled_on && !is_held_on && !is_exclusive_slot) continue;
             block_src = (is_skippable(vk) || is_excluded(vk));
             block_logic = (is_skippable(logic_vk_cfg) || is_excluded(logic_vk_cfg));
@@ -1751,26 +1976,49 @@ static DWORD WINAPI repeat_proc(LPVOID p) {
             if (!idev) continue;
             use_flicker_order = g_skill_flicker;
             any_sent = TRUE;
-            if (local_slots[i].is_mouse) {
-                if (use_flicker_order) {
-                    mbatch[0].state = local_slots[i].mouse_up;
-                    mbatch[1].state = local_slots[i].mouse_dn;
+            if (g_driver_mode == DRV_DD) {
+                if (local_slots[i].is_mouse) {
+                    if (use_flicker_order) {
+                        drv_send_mouse_btn(local_slots[i].mouse_up);
+                        drv_send_mouse_btn(local_slots[i].mouse_dn);
+                    } else {
+                        drv_send_mouse_btn(local_slots[i].mouse_dn);
+                        drv_send_mouse_btn(local_slots[i].mouse_up);
+                    }
                 } else {
-                    mbatch[0].state = local_slots[i].mouse_dn;
-                    mbatch[1].state = local_slots[i].mouse_up;
+                    int rvk = kid_to_vk(local_slots[i].kid);
+                    if (rvk > 0) {
+                        if (use_flicker_order) {
+                            drv_send_key_vk(rvk, FALSE);
+                            drv_send_key_vk(rvk, TRUE);
+                        } else {
+                            drv_send_key_vk(rvk, TRUE);
+                            drv_send_key_vk(rvk, FALSE);
+                        }
+                    }
                 }
-                interception_send(g_ctx, idev, (InterceptionStroke*)mbatch, 2);
             } else {
-                ibatch[0].code = local_slots[i].scan;
-                ibatch[1].code = local_slots[i].scan;
-                if (use_flicker_order) {
-                    ibatch[0].state = local_slots[i].flags_up;
-                    ibatch[1].state = local_slots[i].flags_dn;
+                if (local_slots[i].is_mouse) {
+                    if (use_flicker_order) {
+                        mbatch[0].state = local_slots[i].mouse_up;
+                        mbatch[1].state = local_slots[i].mouse_dn;
+                    } else {
+                        mbatch[0].state = local_slots[i].mouse_dn;
+                        mbatch[1].state = local_slots[i].mouse_up;
+                    }
+                    interception_send(g_ctx, idev, (InterceptionStroke*)mbatch, 2);
                 } else {
-                    ibatch[0].state = local_slots[i].flags_dn;
-                    ibatch[1].state = local_slots[i].flags_up;
+                    ibatch[0].code = local_slots[i].scan;
+                    ibatch[1].code = local_slots[i].scan;
+                    if (use_flicker_order) {
+                        ibatch[0].state = local_slots[i].flags_up;
+                        ibatch[1].state = local_slots[i].flags_dn;
+                    } else {
+                        ibatch[0].state = local_slots[i].flags_dn;
+                        ibatch[1].state = local_slots[i].flags_up;
+                    }
+                    interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2);
                 }
-                interception_send(g_ctx, idev, (InterceptionStroke*)ibatch, 2);
             }
             local_count++;
         }
@@ -1926,6 +2174,7 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
         if (g_active) return;
         if (!g_key_lock && reset_state) release_toggled();
         clear_wasd_down_state();
+        InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
         g_active = TRUE;
         g_rthread = CreateThread(NULL, 0, repeat_proc, NULL, 0, NULL);
         if (with_sound) play_global_sound(TRUE);
@@ -1934,6 +2183,7 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
             clear_wasd_down_state();
             InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
             g_exclusive_macro_break_toggle = FALSE;
+            InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
             release_intercepted_hotkeys();
             if (stop_macro_with_global) macro_stop_all();
             return;
@@ -1949,6 +2199,7 @@ static void set_active_state(BOOL on, BOOL reset_state, BOOL with_sound) {
         }
         InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
         g_exclusive_macro_break_toggle = FALSE;
+        InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
         if (with_sound) play_global_sound(FALSE);
     }
 }
@@ -2119,7 +2370,152 @@ static LRESULT CALLBACK kb_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
             return 1;
         }
 
-        if (!(p->flags & LLKHF_INJECTED)) {
+        if (g_driver_mode == DRV_DD && !(p->flags & LLKHF_INJECTED)) {
+            int src_vk = vk;
+            int cfg_vk = src_vk;
+            int logic_vk = src_vk;
+            BOOL swap_applied = FALSE;
+            BOOL swallowed = FALSE;
+            int logic_kid = vk_to_logic_kid(logic_vk);
+            if (logic_kid < 0 || logic_kid >= MAX_KID) goto dd_kb_done;
+
+            if (g_dd_skip_kid[logic_kid] > 0) {
+                InterlockedDecrement(&g_dd_skip_kid[logic_kid]);
+                if (GetForegroundWindow() == g_hwnd) return 1;
+                goto dd_kb_done;
+            }
+
+            if (g_swap_enabled && (g_active || g_swap_no_start) && src_vk > 0 && src_vk < 256 && g_key_swap[src_vk]) {
+                logic_vk = g_key_swap[src_vk];
+                swap_applied = TRUE;
+                logic_kid = vk_to_logic_kid(logic_vk);
+                if (logic_kid < 0 || logic_kid >= MAX_KID) goto dd_kb_done;
+                if (is_mouse_vk(logic_vk)) {
+                    unsigned short dn, up;
+                    if (mouse_vk_to_bits(logic_vk, &dn, &up)) {
+                        drv_send_mouse_btn(is_up ? up : dn);
+                        swallowed = TRUE;
+                    }
+                } else {
+                    drv_send_key_vk(logic_vk, is_down);
+                    swallowed = TRUE;
+                }
+            }
+
+            if (logic_vk == g_hk_toggle_vk) {
+                if (is_up) g_ihk_toggle_down = FALSE;
+                else if (!g_ihk_toggle_down && !g_setting_hk) {
+                    g_ihk_toggle_down = TRUE;
+                    PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_TOGGLE, 0);
+                }
+            }
+            if (logic_vk == g_hk_game_vk) {
+                if (is_up) g_ihk_game_down = FALSE;
+                else if (!g_ihk_game_down && !g_setting_hk) {
+                    g_ihk_game_down = TRUE;
+                    PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_GAME, 0);
+                }
+            }
+            BOOL is_hk = (logic_vk == g_hk_toggle_vk || logic_vk == g_hk_game_vk);
+            BOOL is_macro_press_hotkey = FALSE;
+            BOOL is_exclusive_excluded = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied) &&
+                is_excluded_for_slot(cfg_vk, logic_vk, swap_applied);
+
+            if (g_macro_active && g_macro_press_mode && (g_active || g_macro_no_start)) {
+                if (logic_vk == g_macro_hk_stop_vk) {
+                    is_macro_press_hotkey = TRUE;
+                } else {
+                    for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++) {
+                        if (g_macro_slots[mi2].enabled && g_macro_slots[mi2].hk_play_vk == logic_vk) {
+                            is_macro_press_hotkey = TRUE; break;
+                        }
+                    }
+                }
+            }
+            macro_on_hotkey_transition(logic_vk, is_down);
+            if (is_macro_press_hotkey) swallowed = TRUE;
+
+            if (is_up) {
+                g_macro_kbd_hk_down[logic_kid] = FALSE;
+            } else if (!g_macro_kbd_hk_down[logic_kid]) {
+                g_macro_kbd_hk_down[logic_kid] = TRUE;
+                HWND mhwnd = macro_get_hwnd();
+                if (mhwnd) {
+                    PostMessageW(mhwnd, WM_MACRO_KBD_HK, (WPARAM)logic_vk, 0);
+                } else if (g_macro_active && (g_active || g_macro_no_start)) {
+                    if (logic_vk == g_macro_hk_stop_vk)
+                        PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + MAX_MACRO_SLOTS, 0);
+                    for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++) {
+                        if (g_macro_slots[mi2].hk_play_vk == logic_vk && g_macro_slots[mi2].enabled)
+                            PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + mi2, 0);
+                    }
+                }
+            }
+            if (is_up) {
+                if (!is_hk) {
+                    if (is_exclusive_excluded && g_held[logic_kid]) {
+                        LONG prev = InterlockedDecrement(&g_exclusive_excluded_hold_count);
+                        if (prev < 0) InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+                    }
+                    g_held[logic_kid]=FALSE; g_hdev[logic_kid]=0;
+                    if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
+                        BOOL keep_toggle = (g_mode==MODE_HYBRID && g_toggled[logic_kid] &&
+                            should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied));
+                        if (!keep_toggle) active_remove(logic_kid);
+                    }
+                }
+            } else if (!is_hk) {
+                if (is_exclusive_excluded && !g_held[logic_kid])
+                    InterlockedIncrement(&g_exclusive_excluded_hold_count);
+                if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[logic_kid]) {
+                    BOOL cfg_match = should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied);
+                    if (cfg_match) {
+                        if (g_toggled[logic_kid]) {
+                            g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
+                            if ((LONG)logic_kid == InterlockedCompareExchange(&g_exclusive_toggle_owner_kid, -1, -1))
+                                InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
+                            PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
+                        } else {
+                            BOOL new_exclusive_toggle = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied);
+                            if (new_exclusive_toggle) clear_other_exclusive_toggles(logic_kid);
+                            g_toggled[logic_kid]=TRUE; g_tdev[logic_kid]=INTERCEPTION_KEYBOARD(0);
+                            if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
+                                unsigned short dn2, up2;
+                                if (mouse_vk_to_bits(logic_vk, &dn2, &up2))
+                                    active_add_mouse_with_vk_swap(logic_kid, cfg_vk, swap_applied, dn2, up2);
+                            } else {
+                                g_tflags[logic_kid] = flags_from_vk(logic_vk);
+                                active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
+                            }
+                            if (new_exclusive_toggle)
+                                InterlockedExchange(&g_exclusive_toggle_owner_kid, logic_kid);
+                            PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
+                        }
+                    }
+                }
+                g_held[logic_kid]=TRUE; g_hdev[logic_kid]=INTERCEPTION_KEYBOARD(0);
+                g_hflags[logic_kid] = flags_from_vk(logic_vk);
+                if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
+                    if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
+                        unsigned short dn2, up2;
+                        if (mouse_vk_to_bits(logic_vk, &dn2, &up2))
+                            active_add_mouse_with_vk_swap(logic_kid, cfg_vk, swap_applied, dn2, up2);
+                    } else active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
+                }
+            }
+            if (g_macro_recording) {
+                MacroEvent me;
+                me.type = is_up ? MACRO_EVT_KEY_UP : MACRO_EVT_KEY_DOWN;
+                me.vk = src_vk; me.scan = (unsigned short)p->scanCode;
+                me.flags = (unsigned short)(p->flags & 0xFF); me.mouse_state = 0; me.mouse_rolling = 0;
+                me.mouse_x = 0; me.mouse_y = 0;
+                QueryPerformanceCounter(&me.timestamp);
+                macro_push_event(&me);
+            }
+            if (src_vk > 0 && src_vk < 256) on_wasd_key_transition(src_vk, is_down);
+            if (swallowed) return 1;
+        dd_kb_done:;
+        } else if (!(p->flags & LLKHF_INJECTED)) {
             if (is_down) {
                 if (vk == g_hk_toggle_vk && !g_hk_toggle_down) {
                     g_hk_toggle_down = TRUE;
@@ -2139,20 +2535,186 @@ static LRESULT CALLBACK kb_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 static LRESULT CALLBACK ms_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
-    (void)lParam;
-    if (nCode == HC_ACTION && g_setting_hk) {
-        int vk = 0;
-        if (wParam == WM_MBUTTONDOWN) vk = VK_MBUTTON;
-        else if (wParam == WM_XBUTTONDOWN) {
-            MSLLHOOKSTRUCT *p = (MSLLHOOKSTRUCT *)lParam;
-            WORD xbtn = HIWORD(p->mouseData);
-            vk = (xbtn == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+    if (nCode == HC_ACTION) {
+        if (g_setting_hk) {
+            int vk = 0;
+            if (wParam == WM_MBUTTONDOWN) vk = VK_MBUTTON;
+            else if (wParam == WM_XBUTTONDOWN) {
+                MSLLHOOKSTRUCT *p = (MSLLHOOKSTRUCT *)lParam;
+                WORD xbtn = HIWORD(p->mouseData);
+                vk = (xbtn == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+            }
+            if (vk) { apply_main_hotkey_selection(vk); return 1; }
         }
-        if (vk) {
-            apply_main_hotkey_selection(vk);
-            return 1;
+        if (g_driver_mode == DRV_DD) {
+            MSLLHOOKSTRUCT *p = (MSLLHOOKSTRUCT *)lParam;
+            if (p->flags & LLMHF_INJECTED) goto ms_hook_pass;
+            int src_vk = 0; BOOL btn_down = FALSE, btn_up = FALSE;
+            switch (wParam) {
+            case WM_LBUTTONDOWN: src_vk = VK_LBUTTON;  btn_down = TRUE; break;
+            case WM_LBUTTONUP:   src_vk = VK_LBUTTON;  btn_up = TRUE;   break;
+            case WM_RBUTTONDOWN: src_vk = VK_RBUTTON;  btn_down = TRUE; break;
+            case WM_RBUTTONUP:   src_vk = VK_RBUTTON;  btn_up = TRUE;   break;
+            case WM_MBUTTONDOWN: src_vk = VK_MBUTTON;  btn_down = TRUE; break;
+            case WM_MBUTTONUP:   src_vk = VK_MBUTTON;  btn_up = TRUE;   break;
+            case WM_XBUTTONDOWN: {
+                WORD xb = HIWORD(p->mouseData);
+                src_vk = (xb == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+                btn_down = TRUE; break;
+            }
+            case WM_XBUTTONUP: {
+                WORD xb = HIWORD(p->mouseData);
+                src_vk = (xb == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+                btn_up = TRUE; break;
+            }
+            case WM_MOUSEWHEEL: {
+                if (g_macro_recording) {
+                    short delta = (short)HIWORD(p->mouseData);
+                    MacroEvent me;
+                    me.type = MACRO_EVT_MOUSE_BTN;
+                    me.vk = 0; me.scan = 0; me.flags = 0;
+                    me.mouse_state = INTERCEPTION_MOUSE_WHEEL;
+                    me.mouse_rolling = delta;
+                    POINT mpt; GetCursorPos(&mpt);
+                    me.mouse_x = mpt.x; me.mouse_y = mpt.y;
+                    QueryPerformanceCounter(&me.timestamp);
+                    macro_push_event(&me);
+                }
+                goto ms_hook_pass;
+            }
+            default: goto ms_hook_pass;
+            }
+            if (!src_vk) goto ms_hook_pass;
+            {
+                int pre_kid = vk_to_logic_kid(src_vk);
+                if (pre_kid >= 0 && pre_kid < MAX_KID && g_dd_skip_kid[pre_kid] > 0) {
+                    InterlockedDecrement(&g_dd_skip_kid[pre_kid]);
+                    if (GetForegroundWindow() == g_hwnd) return 1;
+                    goto ms_hook_pass;
+                }
+            }
+            int cfg_vk = src_vk;
+            int logic_vk = src_vk;
+            BOOL swap_applied = FALSE;
+            BOOL swallowed = FALSE;
+            if (g_swap_enabled && (g_active || g_swap_no_start) && src_vk > 0 && src_vk < 256 && g_key_swap[src_vk]) {
+                logic_vk = g_key_swap[src_vk];
+                swap_applied = TRUE;
+                if (!is_mouse_vk(logic_vk)) {
+                    drv_send_key_vk(logic_vk, btn_down);
+                    swallowed = TRUE;
+                }
+            }
+            int logic_kid = vk_to_logic_kid(logic_vk);
+            if (logic_kid < 0 || logic_kid >= MAX_KID) goto ms_hook_pass;
+            BOOL is_hk = (logic_vk == g_hk_toggle_vk || logic_vk == g_hk_game_vk);
+            BOOL is_exclusive_excluded = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied) &&
+                is_excluded_for_slot(cfg_vk, logic_vk, swap_applied);
+            BOOL is_macro_press_hotkey = FALSE;
+            if (g_macro_active && g_macro_press_mode && (g_active || g_macro_no_start)) {
+                if (logic_vk == g_macro_hk_stop_vk) {
+                    is_macro_press_hotkey = TRUE;
+                } else {
+                    for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++) {
+                        if (g_macro_slots[mi2].enabled && g_macro_slots[mi2].hk_play_vk == logic_vk) {
+                            is_macro_press_hotkey = TRUE; break;
+                        }
+                    }
+                }
+            }
+            if (is_macro_press_hotkey) swallowed = TRUE;
+            if (btn_down) macro_on_hotkey_transition(logic_vk, TRUE);
+            if (btn_up) macro_on_hotkey_transition(logic_vk, FALSE);
+            if (btn_up) {
+                if (!is_hk && is_exclusive_excluded && g_held[logic_kid]) {
+                    LONG prev = InterlockedDecrement(&g_exclusive_excluded_hold_count);
+                    if (prev < 0) InterlockedExchange(&g_exclusive_excluded_hold_count, 0);
+                }
+                g_held[logic_kid]=FALSE; g_hdev[logic_kid]=0;
+                if (!is_hk && (g_mode==MODE_HOLD || g_mode==MODE_HYBRID)) {
+                    BOOL keep_toggle = (g_mode==MODE_HYBRID && g_toggled[logic_kid] &&
+                        should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied));
+                    if (!keep_toggle) active_remove(logic_kid);
+                }
+            }
+            if (btn_down) {
+                if (is_hk) {
+                    if (!g_held[logic_kid]) {
+                        if (logic_vk == g_hk_toggle_vk) PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_TOGGLE, 0);
+                        else if (logic_vk == g_hk_game_vk) PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_GAME, 0);
+                    }
+                    g_held[logic_kid]=TRUE; g_hdev[logic_kid]=INTERCEPTION_MOUSE(0);
+                    goto ms_hook_pass;
+                }
+                if (is_exclusive_excluded && !g_held[logic_kid])
+                    InterlockedIncrement(&g_exclusive_excluded_hold_count);
+                if ((g_mode==MODE_CUSTOM || g_mode==MODE_HYBRID) && g_active && !g_held[logic_kid]) {
+                    BOOL cfg_match = should_toggle_key_for_input(cfg_vk, logic_vk, swap_applied);
+                    if (cfg_match) {
+                        if (g_toggled[logic_kid]) {
+                            g_toggled[logic_kid]=FALSE; g_tdev[logic_kid]=0; active_remove(logic_kid);
+                            if ((LONG)logic_kid == InterlockedCompareExchange(&g_exclusive_toggle_owner_kid, -1, -1))
+                                InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
+                            PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)FALSE, 0);
+                        } else {
+                            BOOL new_exclusive_toggle = is_exclusive_for_slot(cfg_vk, logic_vk, swap_applied);
+                            if (new_exclusive_toggle) clear_other_exclusive_toggles(logic_kid);
+                            g_toggled[logic_kid]=TRUE; g_tdev[logic_kid]=INTERCEPTION_MOUSE(0);
+                            if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
+                                unsigned short dn2, up2;
+                                if (mouse_vk_to_bits(logic_vk, &dn2, &up2))
+                                    active_add_mouse_with_vk_swap(logic_kid, cfg_vk, swap_applied, dn2, up2);
+                            } else {
+                                g_tflags[logic_kid] = flags_from_vk(logic_vk);
+                                active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
+                            }
+                            if (new_exclusive_toggle)
+                                InterlockedExchange(&g_exclusive_toggle_owner_kid, logic_kid);
+                            PostMessageW(g_hwnd, WM_PLAY_TOGGLE_SOUND, (WPARAM)TRUE, 0);
+                        }
+                    }
+                }
+                g_held[logic_kid]=TRUE; g_hdev[logic_kid]=INTERCEPTION_MOUSE(0);
+                g_hflags[logic_kid]=0;
+                if (g_mode==MODE_HOLD || g_mode==MODE_HYBRID) {
+                    if (logic_kid >= MID_LBUTTON && logic_kid <= MID_XBUTTON2) {
+                        unsigned short dn2, up2;
+                        if (mouse_vk_to_bits(logic_vk, &dn2, &up2))
+                            active_add_mouse_with_vk_swap(logic_kid, cfg_vk, swap_applied, dn2, up2);
+                    } else active_add_with_vk_swap(logic_kid, cfg_vk, swap_applied);
+                }
+            }
+            if (btn_down && macro_is_mouse_vk(logic_vk)) {
+                HWND mhwnd = macro_get_hwnd();
+                if (mhwnd)
+                    PostMessageW(mhwnd, WM_MACRO_MOUSE_HK, (WPARAM)logic_vk, 0);
+                else if (g_macro_active && (g_active || g_macro_no_start)) {
+                    if (logic_vk == g_macro_hk_stop_vk)
+                        PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + MAX_MACRO_SLOTS, 0);
+                    for (int mi2 = 0; mi2 < g_macro_slot_count; mi2++)
+                        if (g_macro_slots[mi2].hk_play_vk == logic_vk && g_macro_slots[mi2].enabled)
+                            PostMessageW(g_hwnd, WM_HOTKEY, ID_HK_MACRO_BASE + mi2, 0);
+                }
+            }
+            if (g_macro_recording && (btn_down || btn_up)) {
+                unsigned short mstate = 0;
+                unsigned short mdn, mup;
+                if (mouse_vk_to_bits(src_vk, &mdn, &mup))
+                    mstate = btn_down ? mdn : mup;
+                if (mstate) {
+                    MacroEvent me;
+                    me.type = MACRO_EVT_MOUSE_BTN;
+                    me.vk = 0; me.scan = 0; me.flags = 0; me.mouse_state = mstate; me.mouse_rolling = 0;
+                    POINT mpt; GetCursorPos(&mpt);
+                    me.mouse_x = mpt.x; me.mouse_y = mpt.y;
+                    QueryPerformanceCounter(&me.timestamp);
+                    macro_push_event(&me);
+                }
+            }
+            if (swap_applied || swallowed) return 1;
         }
     }
+ms_hook_pass:
     return CallNextHookEx(g_mshook, nCode, wParam, lParam);
 }
 
@@ -2220,9 +2782,15 @@ static void end_delay_edit(BOOL apply) {
 
 static void update_ui_labels(void) {
     WCHAR t[256];
-    set_label_if_changed(g_lbl_driver, g_drv_ok
-        ? L"\x2714  Interception \x9A71\x52A8\x5C31\x7EEA"
-        : L"\x2716  Interception \x9A71\x52A8\x672A\x5C31\x7EEA");
+    if (g_driver_mode == DRV_DD) {
+        set_label_if_changed(g_lbl_driver, g_drv_ok
+            ? L"\x2714 DD\x5C31\x7EEA"
+            : L"\x2716 DD\x672A\x5C31\x7EEA");
+    } else {
+        set_label_if_changed(g_lbl_driver, g_drv_ok
+            ? L"\x2714 Interception\x5C31\x7EEA"
+            : L"\x2716 Interception\x672A\x5C31\x7EEA");
+    }
 
     if (g_active)
         set_label_if_changed(g_lbl_status, L"\x72B6\x6001:  \x2705 \x5DF2\x5F00\x542F");
@@ -2754,7 +3322,14 @@ static void create_controls(HWND hwnd) {
     HWND lbl;
     int y = KB_Y + 26*KU/4 + 35;
 
-    g_lbl_driver = make_label(hwnd, IDC_LABEL_DRIVER, L"", LP_X, y, 260, 20, 0);
+    g_combo_driver = CreateWindowW(L"COMBOBOX", NULL,
+        WS_CHILD|WS_VISIBLE|WS_VSCROLL|CBS_DROPDOWNLIST,
+        LP_X, y-1, 120, 120, hwnd, (HMENU)(INT_PTR)IDC_COMBO_DRIVER, NULL, NULL);
+    SendMessageW(g_combo_driver, WM_SETFONT, (WPARAM)hf, TRUE);
+    SendMessageW(g_combo_driver, CB_ADDSTRING, 0, (LPARAM)L"DD\x9A71\x52A8");
+    SendMessageW(g_combo_driver, CB_ADDSTRING, 0, (LPARAM)L"Interception\x9A71\x52A8");
+    SendMessageW(g_combo_driver, CB_SETCURSEL, g_driver_mode, 0);
+    g_lbl_driver = make_label(hwnd, IDC_LABEL_DRIVER, L"", LP_X+124, y, 145, 20, 0);
     SendMessageW(g_lbl_driver, WM_SETFONT, (WPARAM)hf, TRUE);
     g_chk_swap = CreateWindowW(L"BUTTON", L"\x952E\x4F4D\x5BF9\x8C03",
         WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LP_X+270, y, 84, 20, hwnd, (HMENU)(INT_PTR)IDC_CHK_SWAP, NULL, NULL);
@@ -3266,6 +3841,70 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_cfg_renaming) end_config_rename(hwnd, TRUE);
             else begin_config_rename();
             break;
+        case IDC_COMBO_DRIVER:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int sel = (int)SendMessageW(g_combo_driver, CB_GETCURSEL, 0, 0);
+                if (sel != CB_ERR && sel != g_driver_mode) {
+                    if (sel == DRV_DD) {
+                        BOOL icp_installed = FALSE;
+                        if (g_dll || load_interception_dll()) {
+                            InterceptionContext tc = interception_create_context();
+                            if (tc) {
+                                wchar_t hw[256];
+                                for (int j = 0; j < INTERCEPTION_MAX_KEYBOARD; j++) {
+                                    if (interception_get_hardware_id(tc, INTERCEPTION_KEYBOARD(j), hw, sizeof(hw)) > 0) {
+                                        icp_installed = TRUE; break;
+                                    }
+                                }
+                                interception_destroy_context(tc);
+                            }
+                        }
+                        if (icp_installed) {
+                            int r = MessageBoxW(hwnd,
+                                L"Interception \x9A71\x52A8\x5DF2\x5B89\x88C5\xFF0C\x4E0E" L"DD\x9A71\x52A8\x51B2\x7A81\xFF0C"
+                                L"\x65E0\x6CD5\x5207\x6362\x5230" L"DD\x3002\n\n"
+                                L"\x662F\x5426\x5378\x8F7DInterception\x9A71\x52A8\xFF1F\n"
+                                L"\xFF08\x5378\x8F7D\x540E\x9700\x91CD\x542F\x7535\x8111\xFF09",
+                                L"\x9A71\x52A8\x51B2\x7A81", MB_YESNO | MB_ICONWARNING);
+                            if (r == IDYES) try_uninstall();
+                            SendMessageW(g_combo_driver, CB_SETCURSEL, g_driver_mode, 0);
+                            break;
+                        }
+                    }
+                    if (g_active) {
+                        g_active = FALSE;
+                        if (g_rthread) { WaitForSingleObject(g_rthread, 500); CloseHandle(g_rthread); g_rthread = NULL; }
+                    }
+                    release_toggled();
+                    if (g_driver_mode == DRV_INTERCEPTION && g_ctx) {
+                        g_quit = TRUE;
+                        if (g_ithread) { WaitForSingleObject(g_ithread, 1000); CloseHandle(g_ithread); g_ithread = NULL; }
+                        interception_destroy_context(g_ctx); g_ctx = NULL;
+                    }
+                    g_drv_ok = FALSE; g_quit = FALSE;
+                    g_driver_mode = sel;
+                    if (g_driver_mode == DRV_DD) {
+                        if (!g_dd_dll) {
+                            if (load_dd_dll()) g_drv_ok = TRUE;
+                            else MessageBoxW(hwnd, L"DD\x9A71\x52A8\x52A0\x8F7D\x5931\x8D25\x3002", L"\x9519\x8BEF", MB_ICONERROR);
+                        } else {
+                            g_drv_ok = TRUE;
+                        }
+                    } else {
+                        if (!g_dll && !load_interception_dll()) {
+                            MessageBoxW(hwnd, L"\x65E0\x6CD5\x52A0\x8F7D interception.dll", L"\x9519\x8BEF", MB_ICONERROR);
+                        } else {
+                            init_interception();
+                            if (!g_drv_ok) try_auto_install();
+                            if (g_ctx) g_ithread = CreateThread(NULL, 0, intercept_proc, NULL, 0, NULL);
+                        }
+                    }
+                    save_config();
+                    update_ui_labels();
+                    InvalidateRect(hwnd, NULL, TRUE);
+                }
+            }
+            break;
         case IDC_CHK_KEYLOCK: {
             BOOL want = (SendMessageW(g_chk_keylock, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (want) {
@@ -3305,7 +3944,21 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         case IDC_CHK_WASD_STABLE: {
-            g_wasd_stable_mode = (SendMessageW(g_chk_wasd_stable, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            BOOL want = (SendMessageW(g_chk_wasd_stable, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (want && !g_wasd_stable_mode) {
+                int r = MessageBoxW(hwnd,
+                    L"开启“WASD 稳定输入模式”后：\n\n"
+                    L"1) 只要检测到 WASD 任意键按下，所有 Toggle/Hold 连发间隔若小于 30ms，会临时提升到 30ms；\n"
+                    L"2) 所有宏（按压与非按压）每轮循环之间额外增加 30ms 延迟；\n"
+                    L"3) 当 WASD 四键全部弹起后，自动恢复原速率。\n\n"
+                    L"确认开启吗？",
+                    L"WASD 稳定输入模式", MB_YESNO | MB_ICONQUESTION);
+                if (r != IDYES) {
+                    SendMessageW(g_chk_wasd_stable, BM_SETCHECK, BST_UNCHECKED, 0);
+                    want = FALSE;
+                }
+            }
+            g_wasd_stable_mode = want;
             if (!g_wasd_stable_mode) clear_wasd_down_state();
             save_config();
             break;
@@ -3620,6 +4273,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_active = FALSE;
         clear_wasd_down_state();
         g_exclusive_macro_break_toggle = FALSE;
+        InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
         if (g_rthread) { WaitForSingleObject(g_rthread,2000); CloseHandle(g_rthread); g_rthread=NULL; }
         release_toggled();
         if (g_game_mode) { RECT gr; GetWindowRect(hwnd,&gr); g_game_x=gr.left; g_game_y=gr.top; g_game_w=gr.right-gr.left; g_game_h=gr.bottom-gr.top; }
@@ -3643,6 +4297,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI);
         clear_wasd_down_state();
+        InterlockedExchange(&g_exclusive_toggle_owner_kid, -1);
         clear_hotkey_registration(hwnd);
         macro_unregister_play_hotkeys(hwnd);
         release_toggle_sounds();
@@ -3680,24 +4335,46 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_LINK_CLASS | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
 
-    if (!load_interception_dll()) {
-        MessageBoxW(NULL, L"\x65E0\x6CD5\x52A0\x8F7D interception.dll", L"\x9519\x8BEF", MB_ICONERROR);
-        return 1;
-    }
-
     InitializeCriticalSection(&g_cs_active);
     QueryPerformanceFrequency(&g_qpc_freq);
     init_exclude_defaults();
     init_custom_keys_defaults();
     macro_init_defaults();
     load_config();
-    init_interception();
+
+    {
+        BOOL interception_installed = FALSE;
+        if (load_interception_dll()) {
+            InterceptionContext test_ctx = interception_create_context();
+            if (test_ctx) {
+                wchar_t hwid[256];
+                for (int i = 0; i < INTERCEPTION_MAX_KEYBOARD; i++) {
+                    if (interception_get_hardware_id(test_ctx, INTERCEPTION_KEYBOARD(i), hwid, sizeof(hwid)) > 0) {
+                        interception_installed = TRUE; break;
+                    }
+                }
+                interception_destroy_context(test_ctx);
+            }
+        }
+        if (interception_installed) {
+            g_driver_mode = DRV_INTERCEPTION;
+            init_interception();
+            if (g_ctx) g_ithread = CreateThread(NULL, 0, intercept_proc, NULL, 0, NULL);
+        } else {
+            g_driver_mode = DRV_DD;
+            if (!load_dd_dll()) {
+                MessageBoxW(NULL,
+                    L"DD\x9A71\x52A8\x52A0\x8F7D\x5931\x8D25\x3002",
+                    L"\x9519\x8BEF", MB_ICONERROR);
+                return 1;
+            }
+            g_drv_ok = TRUE;
+        }
+    }
+
     init_keyrects();
     init_gdi_cache();
     g_game_fx_start_tick = GetTickCount();
-
-    if (!g_drv_ok) try_auto_install();
-    if (g_ctx) g_ithread = CreateThread(NULL, 0, intercept_proc, NULL, 0, NULL);
 
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = wndproc;
@@ -3716,8 +4393,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     int sx = (GetSystemMetrics(SM_CXSCREEN) - ww) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - wh) / 2;
 
-    /* UTF-8: 丐帮高手v5.1 - convert at runtime to avoid source encoding issues */
-    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv5.1";
+    /* UTF-8: 丐帮高手v6.0 - convert at runtime to avoid source encoding issues */
+    static const char title_utf8[] = "\xE4\xB8\x90\xE5\xB8\xAE\xE9\xAB\x98\xE6\x89\x8Bv6.0";
     WCHAR title_w[32];
     MultiByteToWideChar(CP_UTF8, 0, title_utf8, -1, title_w, 32);
     g_hwnd = CreateWindowExW(0, L"AutoKeyClass",
@@ -3751,5 +4428,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmd, int nShow) {
     DeleteCriticalSection(&g_cs_active);
     if (g_dll) { FreeLibrary(g_dll); g_dll = NULL; }
     DeleteFileW(g_dll_path);
+    unload_dd_dll();
     return 0;
 }
