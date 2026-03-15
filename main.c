@@ -172,7 +172,8 @@ static void unload_dd_dll(void) {
 #define MID_XBUTTON2  0x204
 #define MAX_KID       0x205
 
-static volatile LONG g_dd_skip_kid[MAX_KID];
+static volatile LONG g_dd_skip_dn[MAX_KID];
+static volatile LONG g_dd_skip_up[MAX_KID];
 
 static int kid_to_vk(int kid);
 static int vk_to_logic_kid(int vk);
@@ -189,7 +190,7 @@ void drv_send_key_vk(int vk, BOOL down) {
         if (ddcode > 0) {
             int kid = vk_to_logic_kid(vk);
             if (kid >= 0 && kid < MAX_KID)
-                InterlockedIncrement(&g_dd_skip_kid[kid]);
+                InterlockedIncrement(down ? &g_dd_skip_dn[kid] : &g_dd_skip_up[kid]);
             pfn_DD_key(ddcode, down ? 1 : 2);
         }
     } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
@@ -213,7 +214,7 @@ void drv_send_key_scan(unsigned short scan, unsigned short flags_dn, BOOL down, 
             int ddcode = pfn_DD_todc(vk);
             if (ddcode > 0) {
                 if (kid >= 0 && kid < MAX_KID)
-                    InterlockedIncrement(&g_dd_skip_kid[kid]);
+                    InterlockedIncrement(down ? &g_dd_skip_dn[kid] : &g_dd_skip_up[kid]);
                 pfn_DD_key(ddcode, down ? 1 : 2);
             }
         }
@@ -226,11 +227,15 @@ void drv_send_key_scan(unsigned short scan, unsigned short flags_dn, BOOL down, 
     }
 }
 
+static BOOL is_mouse_flag_down(unsigned short f) {
+    return !!(f & (INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN | INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN |
+        INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN | INTERCEPTION_MOUSE_BUTTON_4_DOWN | INTERCEPTION_MOUSE_BUTTON_5_DOWN));
+}
 void drv_send_mouse_btn(unsigned short dd_btn_flag) {
     if (g_driver_mode == DRV_DD && pfn_DD_btn) {
         int kid = mouse_flag_to_kid(dd_btn_flag);
         if (kid >= 0 && kid < MAX_KID)
-            InterlockedIncrement(&g_dd_skip_kid[kid]);
+            InterlockedIncrement(is_mouse_flag_down(dd_btn_flag) ? &g_dd_skip_dn[kid] : &g_dd_skip_up[kid]);
         pfn_DD_btn((int)dd_btn_flag);
     } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send) {
         InterceptionDevice dev = pick_mouse_out_dev();
@@ -246,7 +251,7 @@ void drv_send_mouse_btn_on_dev(unsigned short state, InterceptionDevice dev) {
     if (g_driver_mode == DRV_DD && pfn_DD_btn) {
         int kid = mouse_flag_to_kid(state);
         if (kid >= 0 && kid < MAX_KID)
-            InterlockedIncrement(&g_dd_skip_kid[kid]);
+            InterlockedIncrement(is_mouse_flag_down(state) ? &g_dd_skip_dn[kid] : &g_dd_skip_up[kid]);
         pfn_DD_btn((int)state);
     } else if (g_driver_mode == DRV_INTERCEPTION && g_ctx && pfn_send && dev) {
         InterceptionMouseStroke ms;
@@ -2491,10 +2496,13 @@ static LRESULT CALLBACK kb_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
             int logic_kid = vk_to_logic_kid(logic_vk);
             if (logic_kid < 0 || logic_kid >= MAX_KID) goto dd_kb_done;
 
-            if (g_dd_skip_kid[logic_kid] > 0) {
-                InterlockedDecrement(&g_dd_skip_kid[logic_kid]);
-                if (GetForegroundWindow() == g_hwnd) return 1;
-                goto dd_kb_done;
+            {
+                volatile LONG *skip_p = is_down ? &g_dd_skip_dn[logic_kid] : &g_dd_skip_up[logic_kid];
+                if (*skip_p > 0) {
+                    InterlockedDecrement(skip_p);
+                    if (GetForegroundWindow() == g_hwnd) return 1;
+                    goto dd_kb_done;
+                }
             }
 
             if (g_swap_enabled && (g_active || g_swap_no_start) && src_vk > 0 && src_vk < 256 && g_key_swap[src_vk]) {
@@ -2711,10 +2719,13 @@ static LRESULT CALLBACK ms_hook_proc(int nCode, WPARAM wParam, LPARAM lParam) {
             if (!src_vk) goto ms_hook_pass;
             {
                 int pre_kid = vk_to_logic_kid(src_vk);
-                if (pre_kid >= 0 && pre_kid < MAX_KID && g_dd_skip_kid[pre_kid] > 0) {
-                    InterlockedDecrement(&g_dd_skip_kid[pre_kid]);
-                    if (GetForegroundWindow() == g_hwnd) return 1;
-                    goto ms_hook_pass;
+                if (pre_kid >= 0 && pre_kid < MAX_KID) {
+                    volatile LONG *skip_p = btn_down ? &g_dd_skip_dn[pre_kid] : &g_dd_skip_up[pre_kid];
+                    if (*skip_p > 0) {
+                        InterlockedDecrement(skip_p);
+                        if (GetForegroundWindow() == g_hwnd) return 1;
+                        goto ms_hook_pass;
+                    }
                 }
             }
             int cfg_vk = src_vk;
